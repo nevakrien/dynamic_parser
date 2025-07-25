@@ -1,7 +1,7 @@
 use core::hash::Hash;
 
 pub trait Terminal {
-    type Key: Eq + Hash;
+    type Key: Eq + Hash + Clone;
     fn get_key(&self) -> Self::Key;
 }
 
