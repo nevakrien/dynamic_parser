@@ -6,30 +6,59 @@ use hashbrown::HashMap;
 
 pub type NonTermId = usize;
 
-pub enum Token<T: Terminal> {
+pub enum Token<T: Terminal, F: Fn(&mut State, T),State> {
     Eof,
-    Term(<T as Terminal>::Key),
+    Term(<T as Terminal>::Key, F,PhantomData<State>),
     NonTerm(NonTermId),
 }
 
-pub struct Rule<Term: Terminal, State, F: Fn(&mut State)> {
-    elements: Box<[Token<Term>]>,
-    callback: Option<F>,
+pub struct Rule<Term, State, F1, F2>
+where
+    Term: Terminal,
+    F1: Fn(&mut State),
+    F2: Fn(&mut State, Term),
+{
+    elements: Box<[Token<Term, F2,State>]>,
+    callback: Option<F1>,
     _ph: PhantomData<dyn Fn(&mut State)>,
 }
 
-//TODO: add a way to handle the empty string (distinct from EOF)
-pub type ParseTable<T, State, F> = HashMap<Option<<T as Terminal>::Key>, Rule<T, State, F>>;
-pub type ProdMap<T, State, F> = HashMap<NonTermId, ParseTable<T, State, F>>;
-
-pub struct Parser<Term: Terminal, State, F: Fn(&mut State)> {
-    productions: ProdMap<Term, State, F>,
-}
-
-impl<Term, State, F> Parser<Term, State, F>
+pub struct ParseTable<Term, State, F1, F2>
 where
     Term: Terminal,
-    F: Fn(&mut State),
+    F1: Fn(&mut State),
+    F2: Fn(&mut State, Term),
+{
+    explicit: HashMap<<Term as Terminal>::Key, Rule<Term, State, F1, F2>>,
+    default: Option<Rule<Term, State, F1, F2>>, // ← ε here
+    eof: Option<Rule<Term, State, F1, F2>>,     // distinct EOF rule
+}
+
+impl<Term, State, F1, F2> ParseTable<Term, State, F1, F2>
+where
+    Term: Terminal,
+    F1: Fn(&mut State),
+    F2: Fn(&mut State, Term),
+{	
+    pub fn get_rule(&self, key: Option<&Term::Key>) -> Option<&Rule<Term, State, F1, F2>> {
+        match key {
+            None => self.eof.as_ref(),
+            Some(t) => self.explicit.get(t).or(self.default.as_ref()),
+        }
+    }
+}
+
+pub type ProdMap<T, State, F1, F2> = HashMap<NonTermId, ParseTable<T, State, F1, F2>>;
+
+pub struct Parser<Term: Terminal, State, F1: Fn(&mut State), F2: Fn(&mut State, Term)> {
+    productions: ProdMap<Term, State, F1, F2>,
+}
+
+impl<Term, State, F1, F2> Parser<Term, State, F1, F2>
+where
+    Term: Terminal,
+    F1: Fn(&mut State),
+    F2: Fn(&mut State, Term),
 {
     pub fn parse(
         &self,
@@ -47,9 +76,9 @@ where
         input: &mut Peekable<impl Iterator<Item = Term>>,
     ) {
         let table = &self.productions[&target];
-        let key = input.peek().map(|t| t.get_key());
+        let key = input.peek().map(|x| x.get_key());
+        let rule = table.get_rule(key.as_ref()).expect("syntax error");
 
-        let rule = table.get(&key).expect("TODO");
         for e in rule.elements.iter() {
             match e {
                 Token::Eof => {
@@ -57,11 +86,12 @@ where
                         todo!()
                     }
                 }
-                Token::Term(k) => {
+                Token::Term(k, f, _) => {
                     let found = input.next().expect("TODO");
                     if found.get_key() != *k {
                         todo!()
                     }
+                    f(state,found);
                 }
                 Token::NonTerm(id) => self.parse_threaded(*id, state, input),
             }
@@ -71,4 +101,13 @@ where
             f(state)
         }
     }
+
+    // pub fn parse_step(
+    //     &self,
+    //     parse_stack: Vec<NonTermId>,
+    //     state: &mut State,
+    //     input: &mut Peekable<impl Iterator<Item = Term>>,
+    // ) -> Option<()>{
+    // 	let target = parse_stack.pop()?;
+    // }
 }
