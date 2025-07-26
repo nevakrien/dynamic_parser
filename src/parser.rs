@@ -10,12 +10,19 @@ use hashbrown::HashMap;
 pub type NonTermId = usize;
 
 pub enum Token<T: Terminal, F: Fn(&mut State, T), State> {
+    Eof,
     Term {
         key: <T as Terminal>::Key,
         callback: Option<F>,
         _ph: PhantomData<State>,
     },
     NonTerm(NonTermId),
+}
+
+pub enum ExTerm<K> {
+	Eof,
+	Empty,
+	Term(K)
 }
 
 impl<T, F, State> Clone for Token<T, F, State>
@@ -26,6 +33,7 @@ where
     fn clone(&self) -> Self {
         match self {
             Self::NonTerm(id) => Self::NonTerm(*id),
+            Token::Eof =>Token::Eof,
             Self::Term { key, callback, _ph } => Self::Term {
                 key: key.clone(),
                 callback: callback.clone(),
@@ -63,6 +71,7 @@ where
 {
     explicit: HashMap<<Term as Terminal>::Key, Prod<Term, State, F1, F2>>,
     empty: Option<Prod<Term, State, F1, F2>>,
+    eof: Option<Prod<Term, State, F1, F2>>,
 }
 
 impl<Term, State, F1, F2> ParseTable<Term, State, F1, F2>
@@ -73,13 +82,15 @@ where
 {
     pub fn get_prod(&self, key: Option<&Term::Key>) -> Option<&Prod<Term, State, F1, F2>> {
         match key {
-            None => self.empty.as_ref(),
+            None => self.eof.as_ref().or(self.empty.as_ref()),
             Some(t) => self.explicit.get(t).or(self.empty.as_ref()),
         }
     }
 }
 
+
 pub type ProdMap<T, State, F1, F2> = HashMap<NonTermId, ParseTable<T, State, F1, F2>>;
+
 
 pub struct Parser<Term, State, F1, F2>
 where
@@ -102,13 +113,13 @@ where
         state: &mut State,
         input: &mut impl Iterator<Item = Term>,
     ) -> Result<(), ParseError<Term>> {
-    	let mut input = input.peekable();
+        let mut input = input.peekable();
 
         self.partial_parse(target, state, &mut input)?;
-        
-        match input.next(){
-        	None=>Ok(()),
-        	Some(found)=>Err(ParseError {
+
+        match input.next() {
+            None => Ok(()),
+            Some(found) => Err(ParseError {
                 found: Some(found),
                 expected: vec![None],
             }),
@@ -136,6 +147,14 @@ where
 
         for e in prod.elements.clone().iter() {
             match e {
+                Token::Eof => {
+                	if let Some(found) = input.next() {
+                		 return Err(ParseError {
+                            found: Some(found),
+                            expected: vec![None],
+                        });
+                	}
+                }
                 Token::Term { key, callback, .. } => {
                     let Some(found) = input.next() else {
                         return Err(ParseError {
@@ -163,6 +182,73 @@ where
 
         Ok(())
     }
+
+    // pub fn get_first_set<'a>(
+    //     &'a self,
+    //     prod: &'a Prod<Term, State, F1, F2>,
+    // ) -> impl Iterator<Item = ExTerm<&'a Term::Key>> {
+    //     match prod.elements.first() {
+    //         None => Either::Left(iter::once(ExTerm::Empty)),
+    //         Some(Token::Term { key, .. }) => Either::Left(iter::once(ExTerm::Term(key))),
+    //         Some(Token::Eof) => Either::Left(iter::once(ExTerm::Eof)) ,
+    //         Some(Token::NonTerm(id)) => {
+    //             let non_term = match self.productions.get(id) {
+    //                 Some(x) => x,
+    //                 None => {
+    //                 	let mut dumb = iter::once(ExTerm::Empty);
+    //                 	dumb.next();
+    //                 	return Either::Left(dumb)
+    //                 },
+    //             };
+    //             Either::Right(
+    //                 non_term
+    //                     .explicit
+    //                     .keys()
+    //                     .map(ExTerm::Term)
+    //                     .chain(non_term.empty.iter().map(|_| ExTerm::Empty))
+    //                     .chain(non_term.eof.iter().map(|_| ExTerm::Eof)),
+    //             )
+    //         },
+    //     }
+    // }
+
+    // pub fn check_first<'a>(
+    //     &self,
+    //     id: NonTermId,
+    //     prod: &'a Prod<Term, State, F1, F2>,
+    // ) -> Result<(), &Prod<Term, State, F1, F2>> {
+    //     let non_term = match self.productions.get(&id) {
+    //         None => return Ok(()),
+    //         Some(x) => x,
+    //     };
+
+    //     for e in self.get_first_set(prod) {
+    //         if let Some(p) = non_term.get_prod(e) {
+    //             return Err(p);
+    //         }
+    //     }
+    //     Ok(())
+    // }
+
+    // pub fn get_first_clashes<'a>(
+    //     &self,
+    //     id: NonTermId,
+    //     prod: &'a Prod<Term, State, F1, F2>,
+    // ) -> Vec<&Prod<Term, State, F1, F2>> {
+    //     let mut ans = Vec::new();
+
+    //     let non_term = match self.productions.get(&id) {
+    //         None => return ans,
+    //         Some(x) => x,
+    //     };
+
+    //     for e in self.get_first_set(prod) {
+    //         if let Some(p) = non_term.get_prod(e) {
+    //             ans.push(p)
+    //         }
+    //     }
+    //     ans
+    // }
 }
 
 // -----------------------------------------------------------------------------
@@ -239,7 +325,7 @@ mod tests {
     }
 
     fn on_int(st: &mut EvalState, tok: Tok) {
-  		if let Tok::Int(v) = tok {
+        if let Tok::Int(v) = tok {
             st.stack.push(v);
         }
     }
@@ -253,13 +339,13 @@ mod tests {
     }
 
     impl ProdCb {
-    	fn get_s(&self) -> &'static str{
-    		match self{
-    			ProdCb::Add(s)=>s,
-    			ProdCb::Mul(s)=>s,
-    			ProdCb::Report(s)=>s,
-    		}
-    	}
+        fn get_s(&self) -> &'static str {
+            match self {
+                ProdCb::Add(s) => s,
+                ProdCb::Mul(s) => s,
+                ProdCb::Report(s) => s,
+            }
+        }
     }
 
     impl<Term, F2> CallBack<Term, EvalState, F2> for ProdCb
@@ -269,22 +355,22 @@ mod tests {
     {
         fn call(&self, state: &mut EvalState, _parser: &mut Parser<Term, EvalState, Self, F2>) {
             extern crate std;
-            
-            std::println!("{}",self.get_s());	
+
+            std::println!("{}", self.get_s());
             use std::io::Write;
             std::io::stdout().flush().unwrap();
 
-            if let ProdCb::Report(_) = self{
-            	return;
+            if let ProdCb::Report(_) = self {
+                return;
             }
 
             let b = state.stack.pop().expect("stack underflow");
             let a = state.stack.pop().expect("stack underflow");
-            
+
             match self {
                 ProdCb::Add(_) => state.stack.push(a + b),
                 ProdCb::Mul(_) => state.stack.push(a * b),
-                ProdCb::Report(_) => {},
+                ProdCb::Report(_) => {}
             }
         }
     }
@@ -311,79 +397,117 @@ mod tests {
     }
 
     fn build_parser() -> P {
-	    use Token::{NonTerm, Term};
+        use Token::{NonTerm, Term};
 
-	    // --- token constructors -------------------------------------------------
-	    let tm_plus = Term { key: Key::Plus, callback: None, _ph: PhantomData };
-	    let tm_star = Term { key: Key::Star, callback: None, _ph: PhantomData };
-	    let tm_int  = Term { key: Key::Int,  callback:Some(on_int as TermCb), _ph: PhantomData };
+        // --- token constructors -------------------------------------------------
+        let tm_plus = Term {
+            key: Key::Plus,
+            callback: None,
+            _ph: PhantomData,
+        };
+        let tm_star = Term {
+            key: Key::Star,
+            callback: None,
+            _ph: PhantomData,
+        };
+        let tm_int = Term {
+            key: Key::Int,
+            callback: Some(on_int as TermCb),
+            _ph: PhantomData,
+        };
 
-	    // --- FACTOR → INT -------------------------------------------------------
-	    let mut factor = ParseTable { explicit: HashMap::new(), empty: None };
-	    factor.explicit.insert(
-	        Key::Int,
-	        prod(vec![tm_int], ProdCb::Report("factor -> int"))
-	    );
+        // --- FACTOR → INT -------------------------------------------------------
+        let mut factor = ParseTable {
+            explicit: HashMap::new(),
+            empty: None,
+            eof:None,
+        };
+        factor.explicit.insert(
+            Key::Int,
+            prod(vec![tm_int], ProdCb::Report("factor -> int")),
+        );
 
-	    // --- TERM_TAIL ----------------------------------------------------------
-	    // '*' Factor TermTail   | ε
-	    // ε is legal on look‑ahead
-	    let mut term_tail = ParseTable {
-	        explicit: HashMap::new(),
-	        empty:    Some(prod(vec![], ProdCb::Report("term_trail -> e"))),
-	    };
-	    // '*' branch
-	    term_tail.explicit.insert(
-	        Key::Star,
-	        prod(vec![tm_star.clone(), NonTerm(FACTOR), NonTerm(TERM_TAIL)],
-	             ProdCb::Mul("term_trail -> * factor term_trail"))
-	    );
+        // --- TERM_TAIL ----------------------------------------------------------
+        // '*' Factor TermTail   | ε
+        // ε is legal on look‑ahead
+        let mut term_tail = ParseTable {
+            explicit: HashMap::new(),
+            empty: Some(prod(vec![], ProdCb::Report("term_trail -> e"))),
+            eof:None,
+        };
+        // '*' branch
+        term_tail.explicit.insert(
+            Key::Star,
+            prod(
+                vec![tm_star.clone(), NonTerm(FACTOR), NonTerm(TERM_TAIL)],
+                ProdCb::Mul("term_trail -> * factor term_trail"),
+            ),
+        );
 
-	    // --- TERM → Factor TermTail --------------------------------------------
-	    let mut term = ParseTable { explicit: HashMap::new(), empty: None };
-	    term.explicit.insert(
-	        Key::Int,
-	        prod(vec![NonTerm(FACTOR), NonTerm(TERM_TAIL)], ProdCb::Report("term -> factor term_trail"))
-	    );
+        // --- TERM → Factor TermTail --------------------------------------------
+        let mut term = ParseTable {
+            explicit: HashMap::new(),
+            empty: None,
+            eof:None,
+        };
+        term.explicit.insert(
+            Key::Int,
+            prod(
+                vec![NonTerm(FACTOR), NonTerm(TERM_TAIL)],
+                ProdCb::Report("term -> factor term_trail"),
+            ),
+        );
 
-	    // --- EXPR_TAIL ----------------------------------------------------------
-	    // '+' Term ExprTail     | ε
-	    let mut expr_tail = ParseTable {
-	        explicit: HashMap::new(),
-	        empty:    Some(prod(vec![], ProdCb::Report("expr_trail -> e"))),
-	    };
-	    expr_tail.explicit.insert(
-	        Key::Plus,
-	        prod(vec![tm_plus.clone(), NonTerm(TERM), NonTerm(EXPR_TAIL)],
-	             ProdCb::Add("expr_trail -> + term expr_trail"))
-	    );
+        // --- EXPR_TAIL ----------------------------------------------------------
+        // '+' Term ExprTail     | ε
+        let mut expr_tail = ParseTable {
+            explicit: HashMap::new(),
+            empty: Some(prod(vec![], ProdCb::Report("expr_trail -> e"))),
+            eof:None,
+        };
+        expr_tail.explicit.insert(
+            Key::Plus,
+            prod(
+                vec![tm_plus.clone(), NonTerm(TERM), NonTerm(EXPR_TAIL)],
+                ProdCb::Add("expr_trail -> + term expr_trail"),
+            ),
+        );
 
-	    // --- EXPR → Term ExprTail ----------------------------------------------
-	    //  (top‑level cannot derive ε)
-	    let mut expr = ParseTable { explicit: HashMap::new(), empty: None };
-	    expr.explicit.insert(
-	        Key::Int,
-	        prod(vec![NonTerm(TERM), NonTerm(EXPR_TAIL)], ProdCb::Report("expr -> term expr_trail"))
-	    );
+        // --- EXPR → Term ExprTail ----------------------------------------------
+        //  (top‑level cannot derive ε)
+        let mut expr = ParseTable {
+            explicit: HashMap::new(),
+            empty: None,
+            eof:None,
+        };
+        expr.explicit.insert(
+            Key::Int,
+            prod(
+                vec![NonTerm(TERM), NonTerm(EXPR_TAIL)],
+                ProdCb::Report("expr -> term expr_trail"),
+            ),
+        );
 
-	    // --- assemble -----------------------------------------------------------
-	    let mut prods = HashMap::new();
-	    prods.insert(FACTOR,    factor);
-	    prods.insert(TERM_TAIL, term_tail);
-	    prods.insert(TERM,      term);
-	    prods.insert(EXPR_TAIL, expr_tail);
-	    prods.insert(EXPR,      expr);
+        // --- assemble -----------------------------------------------------------
+        let mut prods = HashMap::new();
+        prods.insert(FACTOR, factor);
+        prods.insert(TERM_TAIL, term_tail);
+        prods.insert(TERM, term);
+        prods.insert(EXPR_TAIL, expr_tail);
+        prods.insert(EXPR, expr);
 
-	    Parser { productions: prods }
-	}
-
+        Parser { productions: prods }
+    }
 
     fn eval(src: &str) -> i32 {
-    	extern crate std;
+        extern crate std;
 
         let mut parser = build_parser();
         let mut st = EvalState::default();
-        let mut toks = lex(src).into_iter().map(|x| { std::println!("reading {:?}",x); x});
+        let mut toks = lex(src).into_iter().map(|x| {
+            std::println!("reading {:?}", x);
+            x
+        });
         parser.parse(EXPR, &mut st, &mut toks).expect("parse error");
         assert!(toks.next().is_none(), "lexer left‑over tokens");
         st.stack.pop().unwrap()
@@ -425,23 +549,28 @@ mod tests {
 
     #[test]
     fn trailing_garbage() {
-    	extern crate std;
+        extern crate std;
         // "2 2" is invalid: second INT must be preceded by '+'
         let mut parser = build_parser();
         let mut st = EvalState::default();
-        let mut it = lex("2 2").into_iter().map(|x| { std::println!("reading {:?}",x); x});
+        let mut it = lex("2 2").into_iter().map(|x| {
+            std::println!("reading {:?}", x);
+            x
+        });
         parser.parse(EXPR, &mut st, &mut it).unwrap_err();
     }
 
     #[test]
     fn complex_trailing_garbage() {
-    	extern crate std;
+        extern crate std;
         let mut parser = build_parser();
         let mut st = EvalState::default();
-        let mut it = lex("1+2+3*4*5+6 2+3+2").into_iter().map(|x| { std::println!("reading {:?}",x); x});
+        let mut it = lex("1+2+3*4*5+6 2+3+2").into_iter().map(|x| {
+            std::println!("reading {:?}", x);
+            x
+        });
         parser.parse(EXPR, &mut st, &mut it).unwrap_err();
     }
-
 
     #[test]
     fn empty_input() {
