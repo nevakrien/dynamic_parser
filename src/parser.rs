@@ -44,7 +44,7 @@ where
 }
 
 #[derive(Clone)]
-pub struct Rule<Term, State, F1, F2>
+pub struct Prod<Term, State, F1, F2>
 where
     Term: Terminal,
     F1: CallBack<Term, State, F2>,
@@ -61,8 +61,8 @@ where
     F1: CallBack<Term, State, F2>,
     F2: Fn(&mut State, Term),
 {
-    explicit: HashMap<<Term as Terminal>::Key, Rule<Term, State, F1, F2>>,
-    empty: Option<Rule<Term, State, F1, F2>>,
+    explicit: HashMap<<Term as Terminal>::Key, Prod<Term, State, F1, F2>>,
+    empty: Option<Prod<Term, State, F1, F2>>,
 }
 
 impl<Term, State, F1, F2> ParseTable<Term, State, F1, F2>
@@ -71,7 +71,7 @@ where
     F1: CallBack<Term, State, F2>,
     F2: Fn(&mut State, Term),
 {
-    pub fn get_rule(&self, key: Option<&Term::Key>) -> Option<&Rule<Term, State, F1, F2>> {
+    pub fn get_prod(&self, key: Option<&Term::Key>) -> Option<&Prod<Term, State, F1, F2>> {
         match key {
             None => self.empty.as_ref(),
             Some(t) => self.explicit.get(t).or(self.empty.as_ref()),
@@ -124,7 +124,7 @@ where
         let table = &self.productions[&target];
         let key = input.peek().map(|x| x.get_key());
 
-        let Some(rule) = table.get_rule(key.as_ref()) else {
+        let Some(prod) = table.get_prod(key.as_ref()) else {
             let expected: Vec<_> = table.explicit.keys().map(|x| Some(x.clone())).collect();
 
             return Err(ParseError {
@@ -132,9 +132,9 @@ where
                 expected,
             });
         };
-        let callback = rule.callback.clone();
+        let callback = prod.callback.clone();
 
-        for e in rule.elements.clone().iter() {
+        for e in prod.elements.clone().iter() {
             match e {
                 Token::Term { key, callback, .. } => {
                     let Some(found) = input.next() else {
@@ -244,25 +244,25 @@ mod tests {
         }
     }
 
-    // ---------- Rule‑callback implementation via ZST enum --------------------
+    // ---------- prod‑callback implementation via ZST enum --------------------
     #[derive(Clone)]
-    enum RuleCb {
+    enum ProdCb {
         Add(&'static str),
         Mul(&'static str),
         Report(&'static str),
     }
 
-    impl RuleCb {
+    impl ProdCb {
     	fn get_s(&self) -> &'static str{
     		match self{
-    			RuleCb::Add(s)=>s,
-    			RuleCb::Mul(s)=>s,
-    			RuleCb::Report(s)=>s,
+    			ProdCb::Add(s)=>s,
+    			ProdCb::Mul(s)=>s,
+    			ProdCb::Report(s)=>s,
     		}
     	}
     }
 
-    impl<Term, F2> CallBack<Term, EvalState, F2> for RuleCb
+    impl<Term, F2> CallBack<Term, EvalState, F2> for ProdCb
     where
         Term: Terminal,
         F2: Fn(&mut EvalState, Term),
@@ -274,7 +274,7 @@ mod tests {
             use std::io::Write;
             std::io::stdout().flush().unwrap();
 
-            if let RuleCb::Report(_) = self{
+            if let ProdCb::Report(_) = self{
             	return;
             }
 
@@ -282,16 +282,16 @@ mod tests {
             let a = state.stack.pop().expect("stack underflow");
             
             match self {
-                RuleCb::Add(_) => state.stack.push(a + b),
-                RuleCb::Mul(_) => state.stack.push(a * b),
-                RuleCb::Report(_) => {},
+                ProdCb::Add(_) => state.stack.push(a + b),
+                ProdCb::Mul(_) => state.stack.push(a * b),
+                ProdCb::Report(_) => {},
             }
         }
     }
 
     // shorthand type aliases
     type TermCb = fn(&mut EvalState, Tok);
-    type P = Parser<Tok, EvalState, RuleCb, TermCb>;
+    type P = Parser<Tok, EvalState, ProdCb, TermCb>;
 
     const FACTOR: usize = 0;
     const TERM_TAIL: usize = 1;
@@ -299,11 +299,11 @@ mod tests {
     const EXPR_TAIL: usize = 3;
     const EXPR: usize = 4;
 
-    fn rule(
+    fn prod(
         elts: Vec<Token<Tok, TermCb, EvalState>>,
-        cb: RuleCb,
-    ) -> Rule<Tok, EvalState, RuleCb, TermCb> {
-        Rule {
+        cb: ProdCb,
+    ) -> Prod<Tok, EvalState, ProdCb, TermCb> {
+        Prod {
             elements: Rc::from(elts.into_boxed_slice()),
             callback: Some(cb),
             _ph: PhantomData,
@@ -322,7 +322,7 @@ mod tests {
 	    let mut factor = ParseTable { explicit: HashMap::new(), empty: None };
 	    factor.explicit.insert(
 	        Key::Int,
-	        rule(vec![tm_int], RuleCb::Report("factor -> int"))
+	        prod(vec![tm_int], ProdCb::Report("factor -> int"))
 	    );
 
 	    // --- TERM_TAIL ----------------------------------------------------------
@@ -330,32 +330,32 @@ mod tests {
 	    // ε is legal on look‑ahead
 	    let mut term_tail = ParseTable {
 	        explicit: HashMap::new(),
-	        empty:    Some(rule(vec![], RuleCb::Report("term_trail -> e"))),
+	        empty:    Some(prod(vec![], ProdCb::Report("term_trail -> e"))),
 	    };
 	    // '*' branch
 	    term_tail.explicit.insert(
 	        Key::Star,
-	        rule(vec![tm_star.clone(), NonTerm(FACTOR), NonTerm(TERM_TAIL)],
-	             RuleCb::Mul("term_trail -> * factor term_trail"))
+	        prod(vec![tm_star.clone(), NonTerm(FACTOR), NonTerm(TERM_TAIL)],
+	             ProdCb::Mul("term_trail -> * factor term_trail"))
 	    );
 
 	    // --- TERM → Factor TermTail --------------------------------------------
 	    let mut term = ParseTable { explicit: HashMap::new(), empty: None };
 	    term.explicit.insert(
 	        Key::Int,
-	        rule(vec![NonTerm(FACTOR), NonTerm(TERM_TAIL)], RuleCb::Report("term -> factor term_trail"))
+	        prod(vec![NonTerm(FACTOR), NonTerm(TERM_TAIL)], ProdCb::Report("term -> factor term_trail"))
 	    );
 
 	    // --- EXPR_TAIL ----------------------------------------------------------
 	    // '+' Term ExprTail     | ε
 	    let mut expr_tail = ParseTable {
 	        explicit: HashMap::new(),
-	        empty:    Some(rule(vec![], RuleCb::Report("expr_trail -> e"))),
+	        empty:    Some(prod(vec![], ProdCb::Report("expr_trail -> e"))),
 	    };
 	    expr_tail.explicit.insert(
 	        Key::Plus,
-	        rule(vec![tm_plus.clone(), NonTerm(TERM), NonTerm(EXPR_TAIL)],
-	             RuleCb::Add("expr_trail -> + term expr_trail"))
+	        prod(vec![tm_plus.clone(), NonTerm(TERM), NonTerm(EXPR_TAIL)],
+	             ProdCb::Add("expr_trail -> + term expr_trail"))
 	    );
 
 	    // --- EXPR → Term ExprTail ----------------------------------------------
@@ -363,7 +363,7 @@ mod tests {
 	    let mut expr = ParseTable { explicit: HashMap::new(), empty: None };
 	    expr.explicit.insert(
 	        Key::Int,
-	        rule(vec![NonTerm(TERM), NonTerm(EXPR_TAIL)], RuleCb::Report("expr -> term expr_trail"))
+	        prod(vec![NonTerm(TERM), NonTerm(EXPR_TAIL)], ProdCb::Report("expr -> term expr_trail"))
 	    );
 
 	    // --- assemble -----------------------------------------------------------
