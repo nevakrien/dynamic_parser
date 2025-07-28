@@ -1,9 +1,76 @@
-//! ll1_check.rs  –  incremental FIRST/FOLLOW checker for any LL(1) backend
+//! check.rs – incremental FIRST/FOLLOW checker for any LL(1) backend
 //!
-//!  •No assumptions about the concrete parser implementation
-//!  •All non‑terminals are addressed by `NonTermId` (usize alias)
-//!  •Terminals travel through `ExTerm<K>` so EOF / ε are represented
+//! This module is **parser‑backend agnostic**: it only knows about productions
+//! (lists of tokens) and never assumes a particular parsing strategy beyond the
+//! LL(1) contract.  All heavy work happens *incrementally* so you can modify a
+//! grammar on the fly (e.g. after a macro expansion) and re‑run just the parts
+//! that became stale.
 //!
+//! ## Core design choices
+//!
+//! * **Non‑terminals** are referred to by the small, copy‑able index
+//!   `NonTermId` (`usize`).  The mapping to pretty names lives entirely in the
+//!   front‑end.
+//! * **Terminals** are wrapped in [`ExTerm`] so that the *artificial* symbols
+//!   **ε** (`Empty`) and **$** (`Eof`) travel through the same APIs as real
+//!   tokens.
+//! * FIRST / FOLLOW / "peek‑safety" tables are cached on demand and can be
+//!   cleared via [`IncSets::flush`] when the grammar mutates.
+//!
+//! ## Full usage example
+//!
+//! ```rust
+//! use std::rc::Rc;
+//! use hashbrown::HashMap;
+//! use dynamic_parser::check::{IncSets, Token, ExTerm};
+//!
+//! // Helper to build an Rc<[Token]> from a slice.
+//! fn rc<T: Clone>(xs: &[Token<T>]) -> Rc<[Token<T>]> {
+//!     Rc::from(xs.to_vec().into_boxed_slice())
+//! }
+//!
+//! // Build a tiny grammar:  S → 'a' S | ε
+//! let mut g: IncSets<char> = IncSets::new();
+//! g.rules.entry(0).or_default().push(rc(&[Token::Term('a'), Token::NonTerm(0)]));
+//! g.rules.entry(0).or_default().push(rc(&[]));
+//!
+//! // Seed FOLLOW(S) with end‑of‑input and compute all tables in one call.
+//! g.add_start(0);
+//! g.calculate();
+//!
+// ! // Turn the grammar into a deterministic parse table or obtain diagnosis.
+// ! let table = g.get_checked_table().expect("grammar should be LL(1)");
+// ! assert_eq!(table[&0][&ExTerm::Term('a')], 0); // first alternative on 'a'
+//! ```
+//!
+//! The resulting `table` is a dense [`HashMap`] that can feed *any* LL(1)
+//! interpreter or be flattened into a code generator.
+//!
+//! ## Dependency graph (public API)
+//!
+//! ```text
+//!      ┌──────────┐    calculate_first_terminals
+//!      │ IncSets  │───────────────────────────┐
+//!      └──────────┘                           │
+//!             │                               ▼
+//!             │  calculate_first_non_terminals
+//!             │                               │
+//!             ▼                               │
+//!       calculate_first  ◀────────────────────┘
+//!             │
+//!             ▼
+//!     calculate_first_seqs   (needs FIRST*)
+//!             │
+//!             ▼
+//!      calculate_follow      (needs FIRST*)
+//!             │
+//!             ▼
+//!      get_checked_table     (needs FIRST* & FOLLOW)
+//! ```
+//!
+//! *All* helper accessors (e.g. [`IncSets::get_first_set`]) rely on the caches
+//! being up‑to‑date – run [`IncSets::calculate`] or the fine‑grained variants
+//! yourself.
 
 use crate::check::hash::Hash;
 use alloc::rc::Rc;
@@ -12,6 +79,7 @@ use core::hash;
 use hashbrown::{HashMap, HashSet};
 
 pub type NonTermId = usize;
+pub type ProdId = usize;
 
 /// Extended terminal domain used by LL(1) set algebra
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -24,6 +92,12 @@ pub enum ExTerm<K> {
     Term(K),
 }
 
+impl<K> From<K> for ExTerm<K> {
+    fn from(k: K) -> Self {
+        ExTerm::Term(k)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Token<K> {
     /// synthetic end‑of‑input symbol ($)
@@ -33,6 +107,12 @@ pub enum Token<K> {
 
     /// derived token
     NonTerm(NonTermId),
+}
+
+impl<K> From<K> for Token<K> {
+    fn from(k: K) -> Self {
+        Token::Term(k)
+    }
 }
 
 pub type TokList<K> = Rc<[Token<K>]>;
@@ -81,6 +161,12 @@ fn calculate_peeks<K>(
     //final result should be good though
     true
 }
+
+/// Retrieves (or computes and memoises) the **FIRST** set of a *slice* of
+/// tokens.
+///
+/// * `first_seq` is the global cache *per production slice*.
+/// * `first`     is the cache *per non‑terminal*.
 pub fn get_first_set<'a, K: Hash + Eq + Clone>(
     tokens: &[Token<K>],
     first_seq: &'a mut HashMap<TokList<K>, HashSet<ExTerm<K>>>,
@@ -95,6 +181,9 @@ pub fn get_first_set<'a, K: Hash + Eq + Clone>(
     //we dropped the refrence frome earlier since we got None
     make_first_set(tokens.into(), unsafe { &mut *first_seq }, first)
 }
+
+/// Same as [`get_first_set`] but takes ownership of an already shared `Rc` to
+/// avoid an extra allocation during memoisation.
 pub fn get_first_set_rc<'a, K: Hash + Eq + Clone>(
     tokens: TokList<K>,
     first_seq: &'a mut HashMap<TokList<K>, HashSet<ExTerm<K>>>,
@@ -146,6 +235,59 @@ fn make_first_set<'a, K: Hash + Eq + Clone>(
     }
 }
 
+
+/// Dense parse table mapping `(NonTermId, lookahead)` to a **single**
+/// production index.  Only available after [`IncSets::get_checked_table`]
+/// verifies that the grammar is LL(1).
+pub type ProdTable<K> = HashMap<NonTermId, HashMap<ExTerm<K>, ProdId>>;
+
+/// Scans the *raw* table (where each cell holds **all** candidate productions)
+/// and yields every FIRST/FIRST conflict.
+///
+/// The iterator lazily produces `(LHS, lookahead, slice_of_productions)` tuples.
+pub fn get_first_first_conflicts<K: Hash + Eq>(
+    table: &HashMap<NonTermId, HashMap<ExTerm<K>, Vec<ProdId>>>,
+) -> impl Iterator<Item = (NonTermId, &ExTerm<K>, &[ProdId])> + {
+    table.iter().flat_map(|(&non_term, m)| {
+        m.iter().filter_map(move |(k, vec)| {
+            if vec.len() > 1 {
+                Some((non_term, k, vec.as_slice()))
+            } else {
+                None
+            }
+        })
+    })
+}
+
+/// Produces FIRST/FOLLOW conflicts – i.e. the intersection FIRST(A) ∩ FOLLOW(A)
+/// for every non‑terminal A.
+pub fn get_first_follow_conflicts<K: Hash + Eq + Clone>(
+    first: &HashMap<NonTermId, HashSet<ExTerm<K>>>,
+    follow: &HashMap<NonTermId, HashSet<ExTerm<K>>>,
+) -> impl Iterator<Item = (NonTermId, HashSet<ExTerm<K>>)> {
+    first.iter().filter_map(|(&non_term, m)| {
+        let other = follow.get(&non_term)?;
+        let mut ans = HashSet::new();
+        for x in m {
+            if other.contains(x) {
+                ans.insert(x.clone());
+            };
+        }
+
+        if ans.is_empty() {
+            None
+        } else {
+            Some((non_term, ans))
+        }
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct GrammerErrors<K> {
+    pub first_first: Vec<(NonTermId, ExTerm<K>, Vec<ProdId>)>,
+    pub first_follow: Vec<(NonTermId, HashSet<ExTerm<K>>)>,
+}
+
 /// holds the rules of a grammer and some metadata
 /// the metadata is only valid after a call to the correct methods is issued
 #[derive(Debug, Clone, PartialEq)]
@@ -190,11 +332,14 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
         self.peeks.clear();
     }
 
+    /// Inserts **$** into FOLLOW(`id`).  Must be invoked **once** on the start
+    /// symbol *before* [`IncSets::calculate_follow`].
     pub fn add_start(&mut self, id: NonTermId) {
         self.follow.entry(id).or_default().insert(ExTerm::Eof);
     }
 
     /// Checks if a rule is valid to be used as a macro (ie changing the input)
+    /// **Dependencies:** caches results to peeks
     pub fn is_valid_macro(&mut self, toks: &[Token<K>]) -> bool {
         let Some(t) = toks.last() else {
             return false;
@@ -223,49 +368,72 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
         ans
     }
 
-    // pub fn first_set_of(&self, tokens: &[Token<K>]) -> HashSet<ExTerm<K>> {
-    //     let mut ans = HashSet::new();
-    //     for t in tokens {
-    //         match t {
-    //             Token::Eof => {
-    //                 ans.insert(ExTerm::Eof);
-    //                 return ans;
-    //             }
-    //             Token::Term(k) => {
-    //                 ans.insert(ExTerm::Term(k.clone()));
-    //                 return ans;
-    //             }
-    //             Token::NonTerm(id) => {
-    //                 let first = &self.first[id];
-    //                 if !first.contains(&ExTerm::Empty) {
-    //                     ans.extend(first.iter().cloned());
-    //                     return ans;
-    //                 }
-
-    //                 ans.extend(first.iter().filter(|x| **x != ExTerm::Empty).cloned());
-    //             }
-    //         };
-    //     }
-
-    //     ans.insert(ExTerm::Empty);
-    //     ans
-    // }
-
+    /// Gets the first set of a slice
+    /// **Dependencies:** depends on a valid [`IncSets::first`]
     pub fn get_first_set(&mut self, tokens: &[Token<K>]) -> &HashSet<ExTerm<K>> {
         get_first_set(tokens, &mut self.first_seq, &self.first)
     }
 
+    /// Computes anything meaningful to compute without clearing any cache
     pub fn calculate(&mut self) {
         self.calculate_first();
+        self.calculate_first_seqs();
         self.calculate_follow();
     }
 
+    /// returns an unchecked prodction table with clashes
+    /// **Dependencies:** depends on a valid [`IncSets::first`]
+    pub fn get_prod_table(&mut self) -> HashMap<NonTermId, HashMap<ExTerm<K>, Vec<ProdId>>> {
+        let mut ans = HashMap::new();
+        for (id, prods) in self.rules.iter() {
+            let a: &mut HashMap<ExTerm<K>, Vec<ProdId>> = ans.entry(*id).or_default();
+            for (i, p) in prods.iter().enumerate() {
+                let first = get_first_set(p, &mut self.first_seq, &self.first);
+                for k in first {
+                    a.entry(k.clone()).or_default().push(i)
+                }
+            }
+        }
+        ans
+    }
+
+    /// main entry use to check all possible errors and retrive a proper prod table
+    /// **Dependencies:** depends on a valid [`IncSets::first`] and [`IncSets::follow`]
+    pub fn get_checked_table(&mut self) -> Result<ProdTable<K>, GrammerErrors<K>> {
+        let table = self.get_prod_table();
+        let first_first: Vec<_> = get_first_first_conflicts(&table)
+            .map(|(i, k, s)| (i, k.clone(), s.into()))
+            .collect();
+
+        let first_follow: Vec<_> = get_first_follow_conflicts(&self.first, &self.follow).collect();
+        if first_first.is_empty() && first_follow.is_empty() {
+            Ok(table
+                .into_iter()
+                .map(|(k, m)| {
+                    (
+                        k,
+                        m.into_iter()
+                            .filter_map(|(k2, v)| Some((k2, *v.first()?)))
+                            .collect(),
+                    )
+                })
+                .collect())
+        } else {
+            Err(GrammerErrors {
+                first_first,
+                first_follow,
+            })
+        }
+    }
+
+    ///makes sure the [`IncSets::first`] set is valid
     pub fn calculate_first(&mut self) {
         self.first_seq.clear();
         self.calculate_first_terminals();
         self.calculate_first_non_terminals()
     }
 
+    ///caches all grammer first sets rules into [`IncSets::first_seq`]
     pub fn calculate_first_seqs(&mut self) {
         for (_, tokens) in iterate_rules(&self.rules) {
             get_first_set_rc(tokens.clone(), &mut self.first_seq, &self.first);
@@ -315,7 +483,14 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
             loop {
                 match self.first[id].contains(&ExTerm::Empty) {
                     false => {
-                        let [Some(other), Some(me)] = self.first.get_many_mut([id, &target]) else {
+                        if *id == target {
+                            break;
+                        }
+
+                        //Safety:we just checked id!=target
+                        let [Some(other), Some(me)] =
+                            (unsafe { self.first.get_many_unchecked_mut([id, &target]) })
+                        else {
                             break;
                         };
 
@@ -326,13 +501,18 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
                         break;
                     }
                     true => {
-                        if let [Some(other), Some(me)] = self.first.get_many_mut([id, &target]) {
-                            for item in other.iter().cloned() {
-                                if item != ExTerm::Empty {
-                                    changed |= me.insert(item);
+                        if *id != target {
+                            //Safety:we just checked id!=target
+                            if let [Some(other), Some(me)] =
+                                unsafe { self.first.get_many_unchecked_mut([id, &target]) }
+                            {
+                                for item in other.iter().cloned() {
+                                    if item != ExTerm::Empty {
+                                        changed |= me.insert(item);
+                                    }
                                 }
-                            }
-                        };
+                            };
+                        }
 
                         loc += 1;
                         match tokens.get(loc) {
@@ -367,6 +547,8 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
         }
     }
 
+    ///makes sure the [`IncSets::follow`] set is valid
+    ///**Dependencies:** depends on a valid [`IncSets::first`]
     pub fn calculate_follow(&mut self) {
         for id in self.rules.keys() {
             self.follow.entry(*id).or_default();
@@ -390,8 +572,11 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
                         changed |= spot.insert(x.clone());
                     }
 
-                    if first.contains(&ExTerm::Empty) {
-                        if let [Some(prod), Some(tgt)] = self.follow.get_many_mut([id, &target]) {
+                    if *id != target && first.contains(&ExTerm::Empty) {
+                        //Safety:we just checked id!=target
+                        if let [Some(prod), Some(tgt)] =
+                            unsafe { self.follow.get_many_unchecked_mut([id, &target]) }
+                        {
                             for x in tgt.iter() {
                                 changed |= prod.insert(x.clone());
                             }
@@ -405,59 +590,6 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
             self._calculate_follow()
         }
     }
-    // fn _calculate_follow(&mut self) {
-    //     let mut changed = false;
-
-    //     for (target, tokens) in iterate_rules(&self.rules) {
-    //         let mut first = HashSet::new();
-    //         first.insert(ExTerm::Empty);
-
-    //         for t in tokens.iter().rev() {
-    //             match t {
-    //                 Token::Term(k) => {
-    //                     first.clear();
-    //                     first.insert(ExTerm::Term(k.clone()));
-    //                 }
-    //                 Token::Eof => {
-    //                     first.clear();
-    //                     first.insert(ExTerm::Eof);
-    //                 }
-    //                 Token::NonTerm(id) => {
-    //                     let spot = self.follow.get_mut(id).unwrap();
-    //                     for x in first.iter() {
-    //                         if *x == ExTerm::Empty {
-    //                             continue;
-    //                         }
-    //                         changed |= spot.insert(x.clone());
-    //                     }
-
-    //                     if first.contains(&ExTerm::Empty) {
-    //                         if let [Some(prod), Some(tgt)] = self.follow.get_many_mut([id, &target])
-    //                         {
-    //                             for x in tgt.iter() {
-    //                                 changed |= prod.insert(x.clone());
-    //                             }
-    //                         }
-    //                     }
-
-    //                     //maintain an accurate first
-    //                     let other_first = &self.first[id];
-    //                     if other_first.contains(&ExTerm::Empty) {
-    //                         first.extend(
-    //                             other_first.iter().filter(|x| **x != ExTerm::Empty).cloned(),
-    //                         )
-    //                     } else {
-    //                         first.clone_from(other_first);
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
-
-    //     if changed {
-    //         self._calculate_follow()
-    //     }
-    // }
 }
 
 #[cfg(test)]
