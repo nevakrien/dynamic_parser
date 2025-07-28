@@ -1,28 +1,46 @@
-use crate::error::ParseError;
-use crate::terminal::Terminal;
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::hash::Hash;
 use core::iter::Peekable;
 use core::marker::PhantomData;
 use hashbrown::HashMap;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParseError<Term: Terminal> {
+    pub found: Option<Term>,
+    pub expected: Vec<Option<Term::Key>>,
+}
+
+pub trait Terminal {
+    type Key: Eq + Hash + Clone;
+    fn get_key(&self) -> Self::Key;
+}
+
+impl Terminal for u8 {
+    type Key = u8;
+    fn get_key(&self) -> u8 {
+        *self
+    }
+}
+
+impl Terminal for char {
+    type Key = u32;
+    fn get_key(&self) -> u32 {
+        *self as u32
+    }
+}
+
 pub type NonTermId = usize;
 
 pub enum Token<T: Terminal, F: Fn(&mut State, T), State> {
-    Eof,
+    // Eof,
     Term {
         key: <T as Terminal>::Key,
         callback: Option<F>,
         _ph: PhantomData<State>,
     },
     NonTerm(NonTermId),
-}
-
-pub enum ExTerm<K> {
-	Eof,
-	Empty,
-	Term(K)
 }
 
 impl<T, F, State> Clone for Token<T, F, State>
@@ -33,7 +51,7 @@ where
     fn clone(&self) -> Self {
         match self {
             Self::NonTerm(id) => Self::NonTerm(*id),
-            Token::Eof =>Token::Eof,
+            // Token::Eof => Token::Eof,
             Self::Term { key, callback, _ph } => Self::Term {
                 key: key.clone(),
                 callback: callback.clone(),
@@ -71,7 +89,7 @@ where
 {
     explicit: HashMap<<Term as Terminal>::Key, Prod<Term, State, F1, F2>>,
     empty: Option<Prod<Term, State, F1, F2>>,
-    eof: Option<Prod<Term, State, F1, F2>>,
+    // eof: Option<Prod<Term, State, F1, F2>>,
 }
 
 impl<Term, State, F1, F2> ParseTable<Term, State, F1, F2>
@@ -82,15 +100,14 @@ where
 {
     pub fn get_prod(&self, key: Option<&Term::Key>) -> Option<&Prod<Term, State, F1, F2>> {
         match key {
-            None => self.eof.as_ref().or(self.empty.as_ref()),
+            // None => self.eof.as_ref().or(self.empty.as_ref()),
+            None => self.empty.as_ref(),
             Some(t) => self.explicit.get(t).or(self.empty.as_ref()),
         }
     }
 }
 
-
 pub type ProdMap<T, State, F1, F2> = HashMap<NonTermId, ParseTable<T, State, F1, F2>>;
-
 
 pub struct Parser<Term, State, F1, F2>
 where
@@ -147,14 +164,14 @@ where
 
         for e in prod.elements.clone().iter() {
             match e {
-                Token::Eof => {
-                	if let Some(found) = input.next() {
-                		 return Err(ParseError {
-                            found: Some(found),
-                            expected: vec![None],
-                        });
-                	}
-                }
+                // Token::Eof => {
+                //     if let Some(found) = input.next() {
+                //         return Err(ParseError {
+                //             found: Some(found),
+                //             expected: vec![None],
+                //         });
+                //     }
+                // }
                 Token::Term { key, callback, .. } => {
                     let Some(found) = input.next() else {
                         return Err(ParseError {
@@ -182,73 +199,6 @@ where
 
         Ok(())
     }
-
-    // pub fn get_first_set<'a>(
-    //     &'a self,
-    //     prod: &'a Prod<Term, State, F1, F2>,
-    // ) -> impl Iterator<Item = ExTerm<&'a Term::Key>> {
-    //     match prod.elements.first() {
-    //         None => Either::Left(iter::once(ExTerm::Empty)),
-    //         Some(Token::Term { key, .. }) => Either::Left(iter::once(ExTerm::Term(key))),
-    //         Some(Token::Eof) => Either::Left(iter::once(ExTerm::Eof)) ,
-    //         Some(Token::NonTerm(id)) => {
-    //             let non_term = match self.productions.get(id) {
-    //                 Some(x) => x,
-    //                 None => {
-    //                 	let mut dumb = iter::once(ExTerm::Empty);
-    //                 	dumb.next();
-    //                 	return Either::Left(dumb)
-    //                 },
-    //             };
-    //             Either::Right(
-    //                 non_term
-    //                     .explicit
-    //                     .keys()
-    //                     .map(ExTerm::Term)
-    //                     .chain(non_term.empty.iter().map(|_| ExTerm::Empty))
-    //                     .chain(non_term.eof.iter().map(|_| ExTerm::Eof)),
-    //             )
-    //         },
-    //     }
-    // }
-
-    // pub fn check_first<'a>(
-    //     &self,
-    //     id: NonTermId,
-    //     prod: &'a Prod<Term, State, F1, F2>,
-    // ) -> Result<(), &Prod<Term, State, F1, F2>> {
-    //     let non_term = match self.productions.get(&id) {
-    //         None => return Ok(()),
-    //         Some(x) => x,
-    //     };
-
-    //     for e in self.get_first_set(prod) {
-    //         if let Some(p) = non_term.get_prod(e) {
-    //             return Err(p);
-    //         }
-    //     }
-    //     Ok(())
-    // }
-
-    // pub fn get_first_clashes<'a>(
-    //     &self,
-    //     id: NonTermId,
-    //     prod: &'a Prod<Term, State, F1, F2>,
-    // ) -> Vec<&Prod<Term, State, F1, F2>> {
-    //     let mut ans = Vec::new();
-
-    //     let non_term = match self.productions.get(&id) {
-    //         None => return ans,
-    //         Some(x) => x,
-    //     };
-
-    //     for e in self.get_first_set(prod) {
-    //         if let Some(p) = non_term.get_prod(e) {
-    //             ans.push(p)
-    //         }
-    //     }
-    //     ans
-    // }
 }
 
 // -----------------------------------------------------------------------------
@@ -420,7 +370,7 @@ mod tests {
         let mut factor = ParseTable {
             explicit: HashMap::new(),
             empty: None,
-            eof:None,
+            // eof: None,
         };
         factor.explicit.insert(
             Key::Int,
@@ -433,7 +383,7 @@ mod tests {
         let mut term_tail = ParseTable {
             explicit: HashMap::new(),
             empty: Some(prod(vec![], ProdCb::Report("term_trail -> e"))),
-            eof:None,
+            // eof: None,
         };
         // '*' branch
         term_tail.explicit.insert(
@@ -448,7 +398,7 @@ mod tests {
         let mut term = ParseTable {
             explicit: HashMap::new(),
             empty: None,
-            eof:None,
+            // eof: None,
         };
         term.explicit.insert(
             Key::Int,
@@ -463,7 +413,7 @@ mod tests {
         let mut expr_tail = ParseTable {
             explicit: HashMap::new(),
             empty: Some(prod(vec![], ProdCb::Report("expr_trail -> e"))),
-            eof:None,
+            // eof: None,
         };
         expr_tail.explicit.insert(
             Key::Plus,
@@ -478,7 +428,7 @@ mod tests {
         let mut expr = ParseTable {
             explicit: HashMap::new(),
             empty: None,
-            eof:None,
+            // eof: None,
         };
         expr.explicit.insert(
             Key::Int,
