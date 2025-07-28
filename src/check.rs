@@ -127,6 +127,10 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
         self.peeks.clear();
     }
 
+    pub fn add_start(&mut self,id:NonTermId){
+        self.follow.entry(id).or_default().insert(ExTerm::Eof);
+    }
+
     /// Checks if a rule is valid to be used as a macro (ie changing the input)
     pub fn is_valid_macro(&mut self, toks: &[Token<K>]) -> bool {
         let Some(t) = toks.last() else {
@@ -156,9 +160,37 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
         ans
     }
 
+    pub fn first_set_of(&self, tokens: &[Token<K>]) -> HashSet<ExTerm<K>> {
+        let mut ans = HashSet::new();
+        for t in tokens {
+            match t {
+                Token::Eof => {
+                    ans.insert(ExTerm::Eof);
+                    return ans;
+                }
+                Token::Term(k) => {
+                    ans.insert(ExTerm::Term(k.clone()));
+                    return ans;
+                }
+                Token::NonTerm(id) => {
+                    let first = &self.first[id];
+                    if !first.contains(&ExTerm::Empty) {
+                        ans.extend(first.iter().cloned());
+                        return ans;
+                    }
+
+                    ans.extend(first.iter().filter(|x| **x != ExTerm::Empty).cloned());
+                }
+            };
+        }
+
+        ans.insert(ExTerm::Empty);
+        ans
+    }
+
     pub fn calculate(&mut self) {
         self.calculate_first();
-        todo!()
+        self.calculate_follow();
     }
 
     pub fn calculate_first(&mut self) {
@@ -171,13 +203,12 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
             let set = self.first.entry(*target).or_default();
 
             for tokens in prods {
-            	
-            	match tokens.first() {
-            		None => {
-            			set.insert(ExTerm::Empty);
-            		}
+                match tokens.first() {
+                    None => {
+                        set.insert(ExTerm::Empty);
+                    }
 
-            		Some(Token::Term(k)) => {
+                    Some(Token::Term(k)) => {
                         set.insert(ExTerm::Term(k.clone()));
                     }
                     Some(Token::Eof) => {
@@ -185,7 +216,7 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
                     }
 
                     Some(Token::NonTerm(_)) => {}
-            	}
+                }
             }
         }
     }
@@ -194,9 +225,9 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
         let mut changed = false;
 
         //we need all these entries there already
-        for id in self.rules.keys() {
-            self.first.entry(*id).or_default();
-        }
+        // for id in self.rules.keys() {
+        //     self.first.entry(*id).or_default();
+        // }
 
         for (target, tokens) in iterate_rules(&self.rules) {
             //skip terminals since they were done already
@@ -208,53 +239,118 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
             let mut id = id;
             let mut loc = 0;
             loop {
-	            match self.first[id].contains(&ExTerm::Empty) {
-	                false => {
-	                	let [Some(other), Some(me)] = self.first.get_many_mut([id, &target]) else {
-			                break;
-			            };
+                match self.first[id].contains(&ExTerm::Empty) {
+                    false => {
+                        let [Some(other), Some(me)] = self.first.get_many_mut([id, &target]) else {
+                            break;
+                        };
 
-	                    for item in other.iter().cloned() {
-	                        changed |= me.insert(item);
-	                    }
+                        for item in other.iter().cloned() {
+                            changed |= me.insert(item);
+                        }
 
-	                    break;
-	                }
-	                true=> {
-	                	if let [Some(other), Some(me)] = self.first.get_many_mut([id, &target]) {
-			                for item in other.iter().cloned() {
-		                        if item != ExTerm::Empty {
-		                            changed |= me.insert(item);
-		                        }
-		                    }
-			            };
-	                    
-	                    loc+=1;
-			            match tokens.get(loc) {
-			                None => {
-			                	changed|=self.first.get_mut(&target).unwrap().insert(ExTerm::Empty);
-	                    		break;
-			                },
-			                Some(Token::NonTerm(new_id))=>{
-			                	id=new_id;
-			                }
-			                Some(Token::Eof)=>{
-			                	changed|=self.first.get_mut(&target).unwrap().insert(ExTerm::Eof);
-			                	break;
-			                },
-			                Some(Token::Term(k)) => {
-			                	changed|=self.first.get_mut(&target).unwrap().insert(ExTerm::Term(k.clone()));
-			                	break;
-			                },
+                        break;
+                    }
+                    true => {
+                        if let [Some(other), Some(me)] = self.first.get_many_mut([id, &target]) {
+                            for item in other.iter().cloned() {
+                                if item != ExTerm::Empty {
+                                    changed |= me.insert(item);
+                                }
+                            }
+                        };
 
-			            }
-	                }
-	            }
-        	}
+                        loc += 1;
+                        match tokens.get(loc) {
+                            None => {
+                                changed |=
+                                    self.first.get_mut(&target).unwrap().insert(ExTerm::Empty);
+                                break;
+                            }
+                            Some(Token::NonTerm(new_id)) => {
+                                id = new_id;
+                            }
+                            Some(Token::Eof) => {
+                                changed |= self.first.get_mut(&target).unwrap().insert(ExTerm::Eof);
+                                break;
+                            }
+                            Some(Token::Term(k)) => {
+                                changed |= self
+                                    .first
+                                    .get_mut(&target)
+                                    .unwrap()
+                                    .insert(ExTerm::Term(k.clone()));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if changed == true {
             self.calculate_first_non_terminals()
+        }
+    }
+
+    pub fn calculate_follow(&mut self){
+        for id in self.rules.keys() {
+            self.follow.entry(*id).or_default();
+        }
+
+        self._calculate_follow()
+    }
+    fn _calculate_follow(&mut self) {
+        let mut changed = false;
+
+        for (target, tokens) in iterate_rules(&self.rules) {
+            let mut first = HashSet::new();
+            first.insert(ExTerm::Empty);
+
+            for t in tokens.iter().rev() {
+                match t {
+                    Token::Term(k) => {
+                        first.clear();
+                        first.insert(ExTerm::Term(k.clone()));
+                    }
+                    Token::Eof => {
+                        first.clear();
+                        first.insert(ExTerm::Eof);
+                    }
+                    Token::NonTerm(id) => {
+                        let spot = self.follow.get_mut(id).unwrap();
+                        for x in first.iter(){
+                            if *x == ExTerm::Empty {
+                                continue;
+                            }
+                            changed|=spot.insert(x.clone());
+                        }
+
+                        if first.contains(&ExTerm::Empty){
+                            if let [Some(prod),Some(tgt)] = self.follow.get_many_mut([id,&target]) {
+                                for x in tgt.iter() {
+                                    changed|=prod.insert(x.clone());
+                                }
+                            }
+                        }
+
+                        //maintain an accurate first
+                        let other_first = &self.first[id]; 
+                        if other_first.contains(&ExTerm::Empty){
+                            first.extend(other_first.iter().filter(|x| **x!=ExTerm::Empty).cloned())
+                        }else{
+                            first.clone_from(other_first);
+                        }
+                        
+                    },
+                }
+            }
+
+
+        }
+
+        if changed == true {
+            self._calculate_follow()
         }
     }
 }
@@ -425,7 +521,7 @@ mod tests {
 
 #[cfg(test)]
 mod first_sets {
-    use super::{IncSets, ExTerm, Token};
+    use super::{ExTerm, IncSets, Token};
     use alloc::rc::Rc;
     use hashbrown::HashSet; // shorter spelling
 
@@ -471,18 +567,18 @@ mod first_sets {
         add_rule(&mut g, S, &[Token::NonTerm(A), Token::NonTerm(B)]);
 
         // A
-        add_rule(&mut g, A, &[]);                  // ε
-        add_rule(&mut g, A, &[Token::Term('a')]);  // 'a'
+        add_rule(&mut g, A, &[]); // ε
+        add_rule(&mut g, A, &[Token::Term('a')]); // 'a'
 
         // B
         add_rule(&mut g, B, &[Token::NonTerm(C)]); // C
-        add_rule(&mut g, B, &[Token::Term('b')]);  // 'b'
+        add_rule(&mut g, B, &[Token::Term('b')]); // 'b'
 
         // C
-        add_rule(&mut g, C, &[]);                  // ε
+        add_rule(&mut g, C, &[]); // ε
 
         // Z
-        add_rule(&mut g, Z, &[Token::Eof]);        // $
+        add_rule(&mut g, Z, &[Token::Eof]); // $
 
         g.calculate_first();
 
@@ -505,15 +601,117 @@ mod first_sets {
         // FIRST(S) = { 'a', 'b' }   (A may ε so ε dropped, then B contributes)
         assert_eq!(
             &g.first[&S],
-            &set(&[ExTerm::Term('a'), ExTerm::Term('b'),ExTerm::Empty]),
+            &set(&[ExTerm::Term('a'), ExTerm::Term('b'), ExTerm::Empty]),
             "FIRST(S)"
         );
 
         // FIRST(Z) = { $ }
+        assert_eq!(&g.first[&Z], &set(&[ExTerm::Eof]), "FIRST(Z)");
+    }
+}
+
+#[cfg(test)]
+mod follow_sets {
+    use super::{IncSets, ExTerm, Token};
+    use alloc::rc::Rc;
+    use hashbrown::HashSet;
+
+    // -------------------------------- helpers ---------------------------------
+    fn rc<K: Clone>(v: &[Token<K>]) -> Rc<[Token<K>]> {
+        Rc::from(v.to_vec().into_boxed_slice())
+    }
+    fn add_rule<K: Eq + core::hash::Hash + Clone>(
+        g: &mut IncSets<K>,
+        lhs: usize,
+        rhs: &[Token<K>],
+    ) {
+        g.rules.entry(lhs).or_default().push(rc(rhs));
+    }
+    fn set<T: Eq + core::hash::Hash>(xs: &[T]) -> HashSet<T>
+    where
+        T: Clone,
+    {
+        xs.iter().cloned().collect()
+    }
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn follow_various_cases() {
+        // Index constants so the rules stay readable
+        const S: usize = 0;
+        const A: usize = 1;
+        const B: usize = 2;
+        const C: usize = 3;
+
+        // ---------------------------------------------------------------------
+        // Grammar under test
+        //
+        //   S  →  A B           (nullable A, nullable B => ε in FOLLOW propagation)
+        //   A  →  ε  | 'a'
+        //   B  →  C  | 'b'
+        //   C  →  ε
+        //
+        // ---------------------------------------------------------------------
+        let mut g: IncSets<char> = IncSets::new();
+
+        // S rules
+        add_rule(&mut g, S, &[Token::NonTerm(A), Token::NonTerm(B)]);
+
+        // A rules
+        add_rule(&mut g, A, &[]);
+        add_rule(&mut g, A, &[Token::Term('a')]);
+
+        // B rules
+        add_rule(&mut g, B, &[Token::NonTerm(C)]);
+        add_rule(&mut g, B, &[Token::Term('b')]);
+
+        // C rules
+        add_rule(&mut g, C, &[]);
+
+        //----------------------------------------------------------------------
+        // 1.  FIRST + nullable (required before FOLLOW)
+        //----------------------------------------------------------------------
+        g.calculate_first();
+
+        //----------------------------------------------------------------------
+        // 2.  FOLLOW
+        //----------------------------------------------------------------------
+        g.add_start(S);
+        g.calculate_follow();
+
+        // FOLLOW(S) = { '$', $ }  ($ from seed, '$' from Z‑rule terminal)
         assert_eq!(
-            &g.first[&Z],
-            &set(&[ExTerm::Eof]),
-            "FIRST(Z)"
+            g.follow[&S],
+            set(&[ExTerm::Eof])
         );
+
+        // FOLLOW(A) = { 'b', '$', $ }
+        //   - 'b' : from S → A B  (terminal immediately after A)
+        //   - '$' + $ : because A nullable, B nullable, so FOLLOW(S) propagates
+        assert_eq!(
+            g.follow[&A],
+            set(&[ExTerm::Term('b'), ExTerm::Eof])
+        );
+
+        // FOLLOW(B) = { '$', $ }  (terminal after S, plus EOF via S)
+        assert_eq!(
+            g.follow[&B],
+            set(&[ ExTerm::Eof])
+        );
+
+        // FOLLOW(C) = { '$', $ }  (B → C •, then FOLLOW(B))
+        assert_eq!(
+            g.follow[&C],
+            set(&[ ExTerm::Eof])
+        );
+
+
+        // 3.  Sanity: No FOLLOW set contains ε
+        for (nt, fset) in &g.follow {
+            assert!(
+                !fset.contains(&ExTerm::Empty),
+                "FOLLOW({nt}) unexpectedly contains ε"
+            );
+        }
     }
 }
