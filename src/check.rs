@@ -265,10 +265,13 @@ pub fn get_first_follow_conflicts<K: Hash + Eq + Clone>(
     first: &HashMap<NonTermId, HashSet<ExTerm<K>>>,
     follow: &HashMap<NonTermId, HashSet<ExTerm<K>>>,
 ) -> impl Iterator<Item = (NonTermId, HashSet<ExTerm<K>>)> {
-    first.iter().filter_map(|(&non_term, m)| {
+    first.iter().filter_map(|(&non_term, first)| {
+        if !first.contains(&ExTerm::Empty){
+            return None;
+        }
         let other = follow.get(&non_term)?;
         let mut ans = HashSet::new();
-        for x in m {
+        for x in first {
             if other.contains(x) {
                 ans.insert(x.clone());
             };
@@ -594,8 +597,10 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
 
 #[cfg(test)]
 mod tests {
-    use super::{IncSets, NonTermId, TokList, Token};
-    use alloc::rc::Rc;
+    use hashbrown::HashSet;
+use alloc::rc::Rc;
+    use super::{ExTerm,NonTermId,TokList, IncSets, Token};
+
 
     /// Convenience: turn a slice into the `Rc<[Token<K>]>` expected by `IncSets`
     fn rc<K: Clone>(v: &[Token<K>]) -> TokList<K> {
@@ -609,6 +614,13 @@ mod tests {
         rhs: &[Token<K>],
     ) {
         g.rules.entry(lhs).or_default().push(rc(rhs));
+    }
+
+    fn set<T: Eq + core::hash::Hash>(xs: &[T]) -> HashSet<T>
+    where
+        T: Clone,
+    {
+        xs.iter().cloned().collect()
     }
 
     #[test]
@@ -754,31 +766,10 @@ mod tests {
         assert!(!g.is_valid_macro(&g.rules[&4][0].clone())); // RESTMEMBERS recursive alternative
         assert!(!g.is_valid_macro(&g.rules[&4][1].clone())); // RESTMEMBERS → ε
     }
-}
 
-#[cfg(test)]
-mod first_sets {
-    use super::{ExTerm, IncSets, Token};
-    use alloc::rc::Rc;
-    use hashbrown::HashSet; // shorter spelling
 
-    // -------- helper utilities ------------------------------------------------
-    fn rc<K: Clone>(v: &[Token<K>]) -> Rc<[Token<K>]> {
-        Rc::from(v.to_vec().into_boxed_slice())
-    }
-    fn add_rule<K: Eq + core::hash::Hash + Clone>(
-        g: &mut IncSets<K>,
-        lhs: usize,
-        rhs: &[Token<K>],
-    ) {
-        g.rules.entry(lhs).or_default().push(rc(rhs));
-    }
-    fn set<T: Eq + core::hash::Hash>(xs: &[T]) -> HashSet<T>
-    where
-        T: Clone,
-    {
-        xs.iter().cloned().collect()
-    }
+    
+
     // --------------------------------------------------------------------------
 
     #[test]
@@ -846,31 +837,8 @@ mod first_sets {
         // FIRST(Z) = { $ }
         assert_eq!(&g.first[&Z], &set(&[ExTerm::Eof]), "FIRST(Z)");
     }
-}
 
-#[cfg(test)]
-mod follow_sets {
-    use super::{ExTerm, IncSets, Token};
-    use alloc::rc::Rc;
-    use hashbrown::HashSet;
-
-    // -------------------------------- helpers ---------------------------------
-    fn rc<K: Clone>(v: &[Token<K>]) -> Rc<[Token<K>]> {
-        Rc::from(v.to_vec().into_boxed_slice())
-    }
-    fn add_rule<K: Eq + core::hash::Hash + Clone>(
-        g: &mut IncSets<K>,
-        lhs: usize,
-        rhs: &[Token<K>],
-    ) {
-        g.rules.entry(lhs).or_default().push(rc(rhs));
-    }
-    fn set<T: Eq + core::hash::Hash>(xs: &[T]) -> HashSet<T>
-    where
-        T: Clone,
-    {
-        xs.iter().cloned().collect()
-    }
+    
     // -------------------------------------------------------------------------
 
     #[test]
@@ -939,5 +907,77 @@ mod follow_sets {
                 "FOLLOW({nt}) unexpectedly contains ε"
             );
         }
+    }
+
+    /// FIRST/FIRST:  S → 'a' A  |  'a' B   (same look‑ahead in two alternatives)
+    #[test]
+    fn detects_first_first_conflict() {
+        const S: usize = 0;
+        const A: usize = 1;
+        const B: usize = 2;
+
+        let mut g: IncSets<char> = IncSets::new();
+        add_rule(&mut g, S, &[Token::Term('a'), Token::NonTerm(A)]);
+        add_rule(&mut g, S, &[Token::Term('a'), Token::NonTerm(B)]);
+        add_rule(&mut g, A, &[Token::Term('x')]);
+        add_rule(&mut g, B, &[Token::Term('y')]);
+
+        g.add_start(S);
+        g.calculate();
+
+        let err = g.get_checked_table().expect_err("should hit FIRST/FIRST clash");
+        assert!(
+            err.first_first.iter().any(|(nt, sym, _)| *nt == S && *sym == ExTerm::Term('a')),
+            "expected FIRST/FIRST conflict on 'a' in S"
+        );
+        // No FIRST/FOLLOW problems in this grammar
+        assert!(err.first_follow.is_empty());
+    }
+
+    /// FIRST/FOLLOW:  A derives 'x', and ‘x’ also follows A in S → A 'x'
+    #[test]
+    fn first_follow_false_conflict() {
+        const S: usize = 0;
+        const A: usize = 1;
+
+        let mut g: IncSets<char> = IncSets::new();
+        // S rules
+        add_rule(&mut g, S, &[Token::NonTerm(A), Token::Term('x')]);
+        add_rule(&mut g, S, &[Token::Term('y')]);
+        // A rule
+        add_rule(&mut g, A, &[Token::Term('x')]);
+
+        g.add_start(S);
+        g.calculate();
+
+        g.get_checked_table().unwrap();
+    }
+
+     /// FIRST/FOLLOW:  A derives 'x' and ε, and ‘x’ also follows A in S → A 'x'
+    #[test]
+    fn detects_first_follow_conflict() {
+        const S: usize = 0;
+        const A: usize = 1;
+
+        let mut g: IncSets<char> = IncSets::new();
+        // S rules
+        add_rule(&mut g, S, &[Token::NonTerm(A), Token::Term('x')]);
+        add_rule(&mut g, S, &[Token::Term('y')]);
+        // A rule
+        add_rule(&mut g, A, &[Token::Term('x')]);
+        add_rule(&mut g, A, &[]);
+
+        g.add_start(S);
+        g.calculate();
+
+        let err = g.get_checked_table().expect_err("should hit FIRST/FOLLOW clash");
+        assert!(
+            err.first_follow
+                .iter()
+                .any(|(nt, overlap)| *nt == A && overlap.contains(&ExTerm::Term('x'))),
+            "expected FIRST/FOLLOW conflict on 'x' for A"
+        );
+        // No FIRST/FIRST problems in this grammar
+        assert!(err.first_first.is_empty());
     }
 }
