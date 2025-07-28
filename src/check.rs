@@ -9,8 +9,6 @@ use crate::check::hash::Hash;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::hash;
-use hashbrown::hash_map::Entry;
-use hashbrown::hash_table::OccupiedEntry;
 use hashbrown::{HashMap, HashSet};
 
 pub type NonTermId = usize;
@@ -43,10 +41,7 @@ pub type TokList<K> = Rc<[Token<K>]>;
 pub fn iterate_rules<K>(
     rules: &HashMap<NonTermId, Vec<TokList<K>>>,
 ) -> impl Iterator<Item = (NonTermId, &TokList<K>)> {
-    rules
-        .iter()
-        .map(|(k, v)| v.iter().map(|x| (*k, x)))
-        .flatten()
+    rules.iter().flat_map(|(k, v)| v.iter().map(|x| (*k, x)))
 }
 
 fn calculate_peeks<K>(
@@ -127,7 +122,7 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
         self.peeks.clear();
     }
 
-    pub fn add_start(&mut self,id:NonTermId){
+    pub fn add_start(&mut self, id: NonTermId) {
         self.follow.entry(id).or_default().insert(ExTerm::Eof);
     }
 
@@ -288,12 +283,12 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
             }
         }
 
-        if changed == true {
+        if changed {
             self.calculate_first_non_terminals()
         }
     }
 
-    pub fn calculate_follow(&mut self){
+    pub fn calculate_follow(&mut self) {
         for id in self.rules.keys() {
             self.follow.entry(*id).or_default();
         }
@@ -319,37 +314,37 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
                     }
                     Token::NonTerm(id) => {
                         let spot = self.follow.get_mut(id).unwrap();
-                        for x in first.iter(){
+                        for x in first.iter() {
                             if *x == ExTerm::Empty {
                                 continue;
                             }
-                            changed|=spot.insert(x.clone());
+                            changed |= spot.insert(x.clone());
                         }
 
-                        if first.contains(&ExTerm::Empty){
-                            if let [Some(prod),Some(tgt)] = self.follow.get_many_mut([id,&target]) {
+                        if first.contains(&ExTerm::Empty) {
+                            if let [Some(prod), Some(tgt)] = self.follow.get_many_mut([id, &target])
+                            {
                                 for x in tgt.iter() {
-                                    changed|=prod.insert(x.clone());
+                                    changed |= prod.insert(x.clone());
                                 }
                             }
                         }
 
                         //maintain an accurate first
-                        let other_first = &self.first[id]; 
-                        if other_first.contains(&ExTerm::Empty){
-                            first.extend(other_first.iter().filter(|x| **x!=ExTerm::Empty).cloned())
-                        }else{
+                        let other_first = &self.first[id];
+                        if other_first.contains(&ExTerm::Empty) {
+                            first.extend(
+                                other_first.iter().filter(|x| **x != ExTerm::Empty).cloned(),
+                            )
+                        } else {
                             first.clone_from(other_first);
                         }
-                        
-                    },
+                    }
                 }
             }
-
-
         }
 
-        if changed == true {
+        if changed {
             self._calculate_follow()
         }
     }
@@ -612,7 +607,7 @@ mod first_sets {
 
 #[cfg(test)]
 mod follow_sets {
-    use super::{IncSets, ExTerm, Token};
+    use super::{ExTerm, IncSets, Token};
     use alloc::rc::Rc;
     use hashbrown::HashSet;
 
@@ -680,31 +675,18 @@ mod follow_sets {
         g.calculate_follow();
 
         // FOLLOW(S) = { '$', $ }  ($ from seed, '$' from Z‑rule terminal)
-        assert_eq!(
-            g.follow[&S],
-            set(&[ExTerm::Eof])
-        );
+        assert_eq!(g.follow[&S], set(&[ExTerm::Eof]));
 
         // FOLLOW(A) = { 'b', '$', $ }
         //   - 'b' : from S → A B  (terminal immediately after A)
         //   - '$' + $ : because A nullable, B nullable, so FOLLOW(S) propagates
-        assert_eq!(
-            g.follow[&A],
-            set(&[ExTerm::Term('b'), ExTerm::Eof])
-        );
+        assert_eq!(g.follow[&A], set(&[ExTerm::Term('b'), ExTerm::Eof]));
 
         // FOLLOW(B) = { '$', $ }  (terminal after S, plus EOF via S)
-        assert_eq!(
-            g.follow[&B],
-            set(&[ ExTerm::Eof])
-        );
+        assert_eq!(g.follow[&B], set(&[ExTerm::Eof]));
 
         // FOLLOW(C) = { '$', $ }  (B → C •, then FOLLOW(B))
-        assert_eq!(
-            g.follow[&C],
-            set(&[ ExTerm::Eof])
-        );
-
+        assert_eq!(g.follow[&C], set(&[ExTerm::Eof]));
 
         // 3.  Sanity: No FOLLOW set contains ε
         for (nt, fset) in &g.follow {
