@@ -9,7 +9,7 @@ use crate::check::hash::Hash;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::hash;
-use hashbrown::{HashMap, HashSet,hash_map::Entry};
+use hashbrown::{HashMap, HashSet};
 
 pub type NonTermId = usize;
 
@@ -41,9 +41,7 @@ pub type TokList<K> = Rc<[Token<K>]>;
 pub fn iterate_rules<K>(
     rules: &HashMap<NonTermId, Vec<TokList<K>>>,
 ) -> impl Iterator<Item = (NonTermId, &TokList<K>)> {
-    rules
-        .iter()
-        .flat_map(|(k, v)| v.iter().map(|x| (*k, x)))
+    rules.iter().flat_map(|(k, v)| v.iter().map(|x| (*k, x)))
 }
 
 fn calculate_peeks<K>(
@@ -83,18 +81,39 @@ fn calculate_peeks<K>(
     //final result should be good though
     true
 }
-
-pub fn get_first_set<'a, K:Hash+Eq+Clone>(tokens:TokList<K>,first_seq: &'a mut HashMap<TokList<K>, HashSet<ExTerm<K>>>,first: &HashMap<NonTermId, HashSet<ExTerm<K>>>) ->&'a HashSet<ExTerm<K>>{
+pub fn get_first_set<'a, K: Hash + Eq + Clone>(
+    tokens: &[Token<K>],
+    first_seq: &'a mut HashMap<TokList<K>, HashSet<ExTerm<K>>>,
+    first: &HashMap<NonTermId, HashSet<ExTerm<K>>>,
+) -> &'a HashSet<ExTerm<K>> {
     //Safety: we need to borrow for 'a when we get a Some but otherwise we borrow short.
     let first_seq: *mut HashMap<TokList<K>, HashSet<ExTerm<K>>> = first_seq as *mut _;
-    if let  Some(x) = unsafe {&*first_seq}.get(&tokens) {
+    if let Some(x) = unsafe { &*first_seq }.get(tokens) {
         return x;
     }
 
     //we dropped the refrence frome earlier since we got None
-    make_first_set(tokens,unsafe {&mut*first_seq},first)
+    make_first_set(tokens.into(), unsafe { &mut *first_seq }, first)
 }
-fn make_first_set<'a,K:Hash+Eq+Clone>(tokens:TokList<K>,first_seq: &'a mut HashMap<TokList<K>, HashSet<ExTerm<K>>>,first: &HashMap<NonTermId, HashSet<ExTerm<K>>>) ->&'a HashSet<ExTerm<K>>{
+pub fn get_first_set_rc<'a, K: Hash + Eq + Clone>(
+    tokens: TokList<K>,
+    first_seq: &'a mut HashMap<TokList<K>, HashSet<ExTerm<K>>>,
+    first: &HashMap<NonTermId, HashSet<ExTerm<K>>>,
+) -> &'a HashSet<ExTerm<K>> {
+    //Safety: we need to borrow for 'a when we get a Some but otherwise we borrow short.
+    let first_seq: *mut HashMap<TokList<K>, HashSet<ExTerm<K>>> = first_seq as *mut _;
+    if let Some(x) = unsafe { &*first_seq }.get(&tokens) {
+        return x;
+    }
+
+    //we dropped the refrence frome earlier since we got None
+    make_first_set(tokens, unsafe { &mut *first_seq }, first)
+}
+fn make_first_set<'a, K: Hash + Eq + Clone>(
+    tokens: TokList<K>,
+    first_seq: &'a mut HashMap<TokList<K>, HashSet<ExTerm<K>>>,
+    first: &HashMap<NonTermId, HashSet<ExTerm<K>>>,
+) -> &'a HashSet<ExTerm<K>> {
     match tokens.first() {
         None => {
             let set = first_seq.entry(tokens).or_default();
@@ -113,18 +132,17 @@ fn make_first_set<'a,K:Hash+Eq+Clone>(tokens:TokList<K>,first_seq: &'a mut HashM
             set
         }
 
-        Some(Token::NonTerm(id))=>{
+        Some(Token::NonTerm(id)) => {
             let f = &first[id];
-            if f.contains(&ExTerm::Empty){
-                let mut set =get_first_set(tokens[1..].into(),first_seq,first).clone();
+            if f.contains(&ExTerm::Empty) {
+                let mut set = get_first_set(tokens[1..].into(), first_seq, first).clone();
 
-                set.extend(f.iter().filter(|x| **x!=ExTerm::Empty).cloned());
+                set.extend(f.iter().filter(|x| **x != ExTerm::Empty).cloned());
                 first_seq.entry(tokens.clone()).or_insert(set)
-                
-            }else{
+            } else {
                 first_seq.entry(tokens.clone()).or_insert(f.clone())
             }
-        },
+        }
     }
 }
 
@@ -233,12 +251,9 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
     //     ans
     // }
 
-
-
-    pub fn get_first_set(&mut self,tokens:TokList<K>)->&HashSet<ExTerm<K>>{
-        get_first_set(tokens,&mut self.first_seq,&self.first)
+    pub fn get_first_set(&mut self, tokens: &[Token<K>]) -> &HashSet<ExTerm<K>> {
+        get_first_set(tokens, &mut self.first_seq, &self.first)
     }
-
 
     pub fn calculate(&mut self) {
         self.calculate_first();
@@ -251,9 +266,9 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
         self.calculate_first_non_terminals()
     }
 
-    pub fn calculate_first_seqs(&mut self){
+    pub fn calculate_first_seqs(&mut self) {
         for (_, tokens) in iterate_rules(&self.rules) {
-            get_first_set(tokens.clone(),&mut self.first_seq,&self.first);
+            get_first_set_rc(tokens.clone(), &mut self.first_seq, &self.first);
         }
     }
 
@@ -357,7 +372,6 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
             self.follow.entry(*id).or_default();
         }
 
-
         self._calculate_follow()
     }
 
@@ -365,9 +379,9 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
         let mut changed = false;
 
         for (target, tokens) in iterate_rules(&self.rules) {
-            for (i,t) in tokens.iter().enumerate().rev() {
+            for (i, t) in tokens.iter().enumerate().rev() {
                 if let Token::NonTerm(id) = t {
-                    let first = get_first_set((&tokens[i+1..]).into(),&mut self.first_seq,&self.first);
+                    let first = get_first_set(&tokens[i + 1..], &mut self.first_seq, &self.first);
                     let spot = self.follow.get_mut(id).unwrap();
                     for x in first.iter() {
                         if *x == ExTerm::Empty {
@@ -377,15 +391,13 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
                     }
 
                     if first.contains(&ExTerm::Empty) {
-                        if let [Some(prod), Some(tgt)] = self.follow.get_many_mut([id, &target])
-                        {
+                        if let [Some(prod), Some(tgt)] = self.follow.get_many_mut([id, &target]) {
                             for x in tgt.iter() {
                                 changed |= prod.insert(x.clone());
                             }
                         }
                     }
                 }
-                
             }
         }
 
@@ -675,7 +687,6 @@ mod first_sets {
 
         g.calculate_first();
         g.calculate_first_seqs();
-
 
         // ---------------- EXPECTED RESULTS ------------------------------------
 
