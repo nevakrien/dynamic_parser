@@ -9,7 +9,7 @@ use crate::check::hash::Hash;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::hash;
-use hashbrown::{HashMap, HashSet};
+use hashbrown::{HashMap, HashSet,hash_map::Entry};
 
 pub type NonTermId = usize;
 
@@ -41,7 +41,9 @@ pub type TokList<K> = Rc<[Token<K>]>;
 pub fn iterate_rules<K>(
     rules: &HashMap<NonTermId, Vec<TokList<K>>>,
 ) -> impl Iterator<Item = (NonTermId, &TokList<K>)> {
-    rules.iter().flat_map(|(k, v)| v.iter().map(|x| (*k, x)))
+    rules
+        .iter()
+        .flat_map(|(k, v)| v.iter().map(|x| (*k, x)))
 }
 
 fn calculate_peeks<K>(
@@ -82,6 +84,50 @@ fn calculate_peeks<K>(
     true
 }
 
+pub fn get_first_set<'a, K:Hash+Eq+Clone>(tokens:TokList<K>,first_seq: &'a mut HashMap<TokList<K>, HashSet<ExTerm<K>>>,first: &HashMap<NonTermId, HashSet<ExTerm<K>>>) ->&'a HashSet<ExTerm<K>>{
+    //Safety: we need to borrow for 'a when we get a Some but otherwise we borrow short.
+    let first_seq: *mut HashMap<TokList<K>, HashSet<ExTerm<K>>> = first_seq as *mut _;
+    if let  Some(x) = unsafe {&*first_seq}.get(&tokens) {
+        return x;
+    }
+
+    //we dropped the refrence frome earlier since we got None
+    make_first_set(tokens,unsafe {&mut*first_seq},first)
+}
+fn make_first_set<'a,K:Hash+Eq+Clone>(tokens:TokList<K>,first_seq: &'a mut HashMap<TokList<K>, HashSet<ExTerm<K>>>,first: &HashMap<NonTermId, HashSet<ExTerm<K>>>) ->&'a HashSet<ExTerm<K>>{
+    match tokens.first() {
+        None => {
+            let set = first_seq.entry(tokens).or_default();
+            set.insert(ExTerm::Empty);
+            set
+        }
+        Some(Token::Eof) => {
+            let set = first_seq.entry(tokens).or_default();
+            set.insert(ExTerm::Eof);
+            set
+        }
+        Some(Token::Term(k)) => {
+            let k = k.clone();
+            let set = first_seq.entry(tokens).or_default();
+            set.insert(ExTerm::Term(k));
+            set
+        }
+
+        Some(Token::NonTerm(id))=>{
+            let f = &first[id];
+            if f.contains(&ExTerm::Empty){
+                let mut set =get_first_set(tokens[1..].into(),first_seq,first).clone();
+
+                set.extend(f.iter().filter(|x| **x!=ExTerm::Empty).cloned());
+                first_seq.entry(tokens.clone()).or_insert(set)
+                
+            }else{
+                first_seq.entry(tokens.clone()).or_insert(f.clone())
+            }
+        },
+    }
+}
+
 /// holds the rules of a grammer and some metadata
 /// the metadata is only valid after a call to the correct methods is issued
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +137,8 @@ pub struct IncSets<K: Eq + Hash + Clone> {
 
     /// FIRST(A)  (includes `Empty` iff A is nullable)
     pub first: HashMap<NonTermId, HashSet<ExTerm<K>>>,
+
+    pub first_seq: HashMap<TokList<K>, HashSet<ExTerm<K>>>,
 
     /// FOLLOW(A) (may contain `ExTerm::Eof`)
     pub follow: HashMap<NonTermId, HashSet<ExTerm<K>>>,
@@ -103,6 +151,7 @@ impl<K: Eq + Hash + Clone> Default for IncSets<K> {
     fn default() -> Self {
         Self {
             first: HashMap::new(),
+            first_seq: HashMap::new(),
             follow: HashMap::new(),
             peeks: HashMap::new(),
             rules: HashMap::new(),
@@ -118,6 +167,7 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
     /// Clears all previously computed information.
     pub fn flush(&mut self) {
         self.first.values_mut().for_each(HashSet::clear);
+        self.first_seq.clear();
         self.follow.values_mut().for_each(HashSet::clear);
         self.peeks.clear();
     }
@@ -155,33 +205,40 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
         ans
     }
 
-    pub fn first_set_of(&self, tokens: &[Token<K>]) -> HashSet<ExTerm<K>> {
-        let mut ans = HashSet::new();
-        for t in tokens {
-            match t {
-                Token::Eof => {
-                    ans.insert(ExTerm::Eof);
-                    return ans;
-                }
-                Token::Term(k) => {
-                    ans.insert(ExTerm::Term(k.clone()));
-                    return ans;
-                }
-                Token::NonTerm(id) => {
-                    let first = &self.first[id];
-                    if !first.contains(&ExTerm::Empty) {
-                        ans.extend(first.iter().cloned());
-                        return ans;
-                    }
+    // pub fn first_set_of(&self, tokens: &[Token<K>]) -> HashSet<ExTerm<K>> {
+    //     let mut ans = HashSet::new();
+    //     for t in tokens {
+    //         match t {
+    //             Token::Eof => {
+    //                 ans.insert(ExTerm::Eof);
+    //                 return ans;
+    //             }
+    //             Token::Term(k) => {
+    //                 ans.insert(ExTerm::Term(k.clone()));
+    //                 return ans;
+    //             }
+    //             Token::NonTerm(id) => {
+    //                 let first = &self.first[id];
+    //                 if !first.contains(&ExTerm::Empty) {
+    //                     ans.extend(first.iter().cloned());
+    //                     return ans;
+    //                 }
 
-                    ans.extend(first.iter().filter(|x| **x != ExTerm::Empty).cloned());
-                }
-            };
-        }
+    //                 ans.extend(first.iter().filter(|x| **x != ExTerm::Empty).cloned());
+    //             }
+    //         };
+    //     }
 
-        ans.insert(ExTerm::Empty);
-        ans
+    //     ans.insert(ExTerm::Empty);
+    //     ans
+    // }
+
+
+
+    pub fn get_first_set(&mut self,tokens:TokList<K>)->&HashSet<ExTerm<K>>{
+        get_first_set(tokens,&mut self.first_seq,&self.first)
     }
+
 
     pub fn calculate(&mut self) {
         self.calculate_first();
@@ -189,8 +246,15 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
     }
 
     pub fn calculate_first(&mut self) {
+        self.first_seq.clear();
         self.calculate_first_terminals();
         self.calculate_first_non_terminals()
+    }
+
+    pub fn calculate_first_seqs(&mut self){
+        for (_, tokens) in iterate_rules(&self.rules) {
+            get_first_set(tokens.clone(),&mut self.first_seq,&self.first);
+        }
     }
 
     pub fn calculate_first_terminals(&mut self) {
@@ -293,54 +357,35 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
             self.follow.entry(*id).or_default();
         }
 
+
         self._calculate_follow()
     }
+
     fn _calculate_follow(&mut self) {
         let mut changed = false;
 
         for (target, tokens) in iterate_rules(&self.rules) {
-            let mut first = HashSet::new();
-            first.insert(ExTerm::Empty);
-
-            for t in tokens.iter().rev() {
-                match t {
-                    Token::Term(k) => {
-                        first.clear();
-                        first.insert(ExTerm::Term(k.clone()));
-                    }
-                    Token::Eof => {
-                        first.clear();
-                        first.insert(ExTerm::Eof);
-                    }
-                    Token::NonTerm(id) => {
-                        let spot = self.follow.get_mut(id).unwrap();
-                        for x in first.iter() {
-                            if *x == ExTerm::Empty {
-                                continue;
-                            }
-                            changed |= spot.insert(x.clone());
+            for (i,t) in tokens.iter().enumerate().rev() {
+                if let Token::NonTerm(id) = t {
+                    let first = get_first_set((&tokens[i+1..]).into(),&mut self.first_seq,&self.first);
+                    let spot = self.follow.get_mut(id).unwrap();
+                    for x in first.iter() {
+                        if *x == ExTerm::Empty {
+                            continue;
                         }
+                        changed |= spot.insert(x.clone());
+                    }
 
-                        if first.contains(&ExTerm::Empty) {
-                            if let [Some(prod), Some(tgt)] = self.follow.get_many_mut([id, &target])
-                            {
-                                for x in tgt.iter() {
-                                    changed |= prod.insert(x.clone());
-                                }
+                    if first.contains(&ExTerm::Empty) {
+                        if let [Some(prod), Some(tgt)] = self.follow.get_many_mut([id, &target])
+                        {
+                            for x in tgt.iter() {
+                                changed |= prod.insert(x.clone());
                             }
-                        }
-
-                        //maintain an accurate first
-                        let other_first = &self.first[id];
-                        if other_first.contains(&ExTerm::Empty) {
-                            first.extend(
-                                other_first.iter().filter(|x| **x != ExTerm::Empty).cloned(),
-                            )
-                        } else {
-                            first.clone_from(other_first);
                         }
                     }
                 }
+                
             }
         }
 
@@ -348,6 +393,59 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
             self._calculate_follow()
         }
     }
+    // fn _calculate_follow(&mut self) {
+    //     let mut changed = false;
+
+    //     for (target, tokens) in iterate_rules(&self.rules) {
+    //         let mut first = HashSet::new();
+    //         first.insert(ExTerm::Empty);
+
+    //         for t in tokens.iter().rev() {
+    //             match t {
+    //                 Token::Term(k) => {
+    //                     first.clear();
+    //                     first.insert(ExTerm::Term(k.clone()));
+    //                 }
+    //                 Token::Eof => {
+    //                     first.clear();
+    //                     first.insert(ExTerm::Eof);
+    //                 }
+    //                 Token::NonTerm(id) => {
+    //                     let spot = self.follow.get_mut(id).unwrap();
+    //                     for x in first.iter() {
+    //                         if *x == ExTerm::Empty {
+    //                             continue;
+    //                         }
+    //                         changed |= spot.insert(x.clone());
+    //                     }
+
+    //                     if first.contains(&ExTerm::Empty) {
+    //                         if let [Some(prod), Some(tgt)] = self.follow.get_many_mut([id, &target])
+    //                         {
+    //                             for x in tgt.iter() {
+    //                                 changed |= prod.insert(x.clone());
+    //                             }
+    //                         }
+    //                     }
+
+    //                     //maintain an accurate first
+    //                     let other_first = &self.first[id];
+    //                     if other_first.contains(&ExTerm::Empty) {
+    //                         first.extend(
+    //                             other_first.iter().filter(|x| **x != ExTerm::Empty).cloned(),
+    //                         )
+    //                     } else {
+    //                         first.clone_from(other_first);
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+
+    //     if changed {
+    //         self._calculate_follow()
+    //     }
+    // }
 }
 
 #[cfg(test)]
@@ -576,6 +674,8 @@ mod first_sets {
         add_rule(&mut g, Z, &[Token::Eof]); // $
 
         g.calculate_first();
+        g.calculate_first_seqs();
+
 
         // ---------------- EXPECTED RESULTS ------------------------------------
 
@@ -667,6 +767,7 @@ mod follow_sets {
         // 1.  FIRST + nullable (required before FOLLOW)
         //----------------------------------------------------------------------
         g.calculate_first();
+        g.calculate_first_seqs();
 
         //----------------------------------------------------------------------
         // 2.  FOLLOW
