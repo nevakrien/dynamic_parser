@@ -15,14 +15,14 @@
 //!   **ε** (`Empty`) and **$** (`Eof`) travel through the same APIs as real
 //!   tokens.
 //! * FIRST / FOLLOW / "peek‑safety" tables are cached on demand and can be
-//!   cleared via [`IncSets::flush`] when the grammar mutates.
+//!   cleared via [`LLGrammar::flush`] when the grammar mutates.
 //!
 //! ## Full usage example
 //!
 //! ```rust
 //! use std::rc::Rc;
 //! use hashbrown::HashMap;
-//! use dynamic_parser::check::{IncSets, Token, ExTerm};
+//! use dynamic_parser::check::{LLGrammar, Token, ExTerm};
 //!
 //! // Helper to build an Rc<[Token]> from a slice.
 //! fn rc<T: Clone>(xs: &[Token<T>]) -> Rc<[Token<T>]> {
@@ -30,7 +30,7 @@
 //! }
 //!
 //! // Build a tiny grammar:  S → 'a' S | ε
-//! let mut g: IncSets<char> = IncSets::new();
+//! let mut g: LLGrammar<char> = LLGrammar::new();
 //! g.rules.entry(0).or_default().push(rc(&[Token::Term('a'), Token::NonTerm(0)]));
 //! g.rules.entry(0).or_default().push(rc(&[]));
 //!
@@ -50,7 +50,7 @@
 //!
 //! ```text
 //!      ┌──────────┐    calculate_first_terminals
-//!      │ IncSets  │───────────────────────────┐
+//!      │ LLGrammar  │───────────────────────────┐
 //!      └──────────┘                           │
 //!             │                               ▼
 //!             │  calculate_first_non_terminals
@@ -68,11 +68,13 @@
 //!      get_checked_table     (needs FIRST* & FOLLOW)
 //! ```
 //!
-//! *All* helper accessors (e.g. [`IncSets::get_first_set`]) rely on the caches
-//! being up‑to‑date – run [`IncSets::calculate`] or the fine‑grained variants
+//! *All* helper accessors (e.g. [`LLGrammar::get_first_set`]) rely on the caches
+//! being up‑to‑date – run [`LLGrammar::calculate`] or the fine‑grained variants
 //! yourself.
 
+use crate::parser::Terminal;
 use crate::check::hash::Hash;
+use crate::parser::Token as PToken;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::hash;
@@ -109,9 +111,14 @@ pub enum Token<K> {
     NonTerm(NonTermId),
 }
 
-impl<K> From<K> for Token<K> {
-    fn from(k: K) -> Self {
-        Token::Term(k)
+
+
+impl<T: Terminal, F1: Fn(&mut State, T), State> From<PToken<T,F1, State>> for Token<T::Key> {
+    fn from(tok:PToken<T,F1, State>) -> Self {
+        match tok {
+            PToken::Term { key, ..}=>Token::Term(key),
+            PToken::NonTerm(id) => Token::NonTerm(id),
+        }
     }
 }
 
@@ -235,9 +242,8 @@ fn make_first_set<'a, K: Hash + Eq + Clone>(
     }
 }
 
-
 /// Dense parse table mapping `(NonTermId, lookahead)` to a **single**
-/// production index.  Only available after [`IncSets::get_checked_table`]
+/// production index.  Only available after [`LLGrammar::get_checked_table`]
 /// verifies that the grammar is LL(1).
 pub type ProdTable<K> = HashMap<NonTermId, HashMap<ExTerm<K>, ProdId>>;
 
@@ -247,7 +253,7 @@ pub type ProdTable<K> = HashMap<NonTermId, HashMap<ExTerm<K>, ProdId>>;
 /// The iterator lazily produces `(LHS, lookahead, slice_of_productions)` tuples.
 pub fn get_first_first_conflicts<K: Hash + Eq>(
     table: &HashMap<NonTermId, HashMap<ExTerm<K>, Vec<ProdId>>>,
-) -> impl Iterator<Item = (NonTermId, &ExTerm<K>, &[ProdId])> + {
+) -> impl Iterator<Item = (NonTermId, &ExTerm<K>, &[ProdId])> {
     table.iter().flat_map(|(&non_term, m)| {
         m.iter().filter_map(move |(k, vec)| {
             if vec.len() > 1 {
@@ -266,7 +272,7 @@ pub fn get_first_follow_conflicts<K: Hash + Eq + Clone>(
     follow: &HashMap<NonTermId, HashSet<ExTerm<K>>>,
 ) -> impl Iterator<Item = (NonTermId, HashSet<ExTerm<K>>)> {
     first.iter().filter_map(|(&non_term, first)| {
-        if !first.contains(&ExTerm::Empty){
+        if !first.contains(&ExTerm::Empty) {
             return None;
         }
         let other = follow.get(&non_term)?;
@@ -294,7 +300,7 @@ pub struct GrammerErrors<K> {
 /// holds the rules of a grammer and some metadata
 /// the metadata is only valid after a call to the correct methods is issued
 #[derive(Debug, Clone, PartialEq)]
-pub struct IncSets<K: Eq + Hash + Clone> {
+pub struct LLGrammar<K: Eq + Hash + Clone> {
     /// production rules provided by the user
     pub rules: HashMap<NonTermId, Vec<TokList<K>>>,
 
@@ -310,7 +316,7 @@ pub struct IncSets<K: Eq + Hash + Clone> {
     pub peeks: HashMap<NonTermId, bool>,
 }
 
-impl<K: Eq + Hash + Clone> Default for IncSets<K> {
+impl<K: Eq + Hash + Clone> Default for LLGrammar<K> {
     fn default() -> Self {
         Self {
             first: HashMap::new(),
@@ -322,7 +328,19 @@ impl<K: Eq + Hash + Clone> Default for IncSets<K> {
     }
 }
 
-impl<K: Eq + Hash + Clone> IncSets<K> {
+impl<K: Eq + Hash + Clone> LLGrammar<K> {
+    pub fn from_rules(iter:impl Iterator<Item = (NonTermId,TokList<K>)>)->Self{
+        let mut ans = Self::new();
+        ans.add_rules(iter);
+        ans
+    }
+
+    pub fn add_rules(&mut self, iter:impl Iterator<Item = (NonTermId,TokList<K>)>){
+        for (k,v) in iter {
+            self.rules.entry(k).or_default().push(v);
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -336,9 +354,17 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
     }
 
     /// Inserts **$** into FOLLOW(`id`).  Must be invoked **once** on the start
-    /// symbol *before* [`IncSets::calculate_follow`].
+    /// symbol *before* [`LLGrammar::calculate_follow`].
     pub fn add_start(&mut self, id: NonTermId) {
         self.follow.entry(id).or_default().insert(ExTerm::Eof);
+    }
+
+    pub fn add_rule(
+        self: &mut LLGrammar<K>,
+        lhs: NonTermId,
+        rhs: Rc<[Token<K>]>,
+    ) {
+        self.rules.entry(lhs).or_default().push(rhs);
     }
 
     /// Checks if a rule is valid to be used as a macro (ie changing the input)
@@ -372,7 +398,7 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
     }
 
     /// Gets the first set of a slice
-    /// **Dependencies:** depends on a valid [`IncSets::first`]
+    /// **Dependencies:** depends on a valid [`LLGrammar::first`]
     pub fn get_first_set(&mut self, tokens: &[Token<K>]) -> &HashSet<ExTerm<K>> {
         get_first_set(tokens, &mut self.first_seq, &self.first)
     }
@@ -385,7 +411,7 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
     }
 
     /// returns an unchecked prodction table with clashes
-    /// **Dependencies:** depends on a valid [`IncSets::first`]
+    /// **Dependencies:** depends on a valid [`LLGrammar::first`]
     pub fn get_prod_table(&mut self) -> HashMap<NonTermId, HashMap<ExTerm<K>, Vec<ProdId>>> {
         let mut ans = HashMap::new();
         for (id, prods) in self.rules.iter() {
@@ -401,7 +427,7 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
     }
 
     /// main entry use to check all possible errors and retrive a proper prod table
-    /// **Dependencies:** depends on a valid [`IncSets::first`] and [`IncSets::follow`]
+    /// **Dependencies:** depends on a valid [`LLGrammar::first`] and [`LLGrammar::follow`]
     pub fn get_checked_table(&mut self) -> Result<ProdTable<K>, GrammerErrors<K>> {
         let table = self.get_prod_table();
         let first_first: Vec<_> = get_first_first_conflicts(&table)
@@ -429,14 +455,14 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
         }
     }
 
-    ///makes sure the [`IncSets::first`] set is valid
+    ///makes sure the [`LLGrammar::first`] set is valid
     pub fn calculate_first(&mut self) {
         self.first_seq.clear();
         self.calculate_first_terminals();
         self.calculate_first_non_terminals()
     }
 
-    ///caches all grammer first sets rules into [`IncSets::first_seq`]
+    ///caches all grammer first sets rules into [`LLGrammar::first_seq`]
     pub fn calculate_first_seqs(&mut self) {
         for (_, tokens) in iterate_rules(&self.rules) {
             get_first_set_rc(tokens.clone(), &mut self.first_seq, &self.first);
@@ -550,8 +576,8 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
         }
     }
 
-    ///makes sure the [`IncSets::follow`] set is valid
-    ///**Dependencies:** depends on a valid [`IncSets::first`]
+    ///makes sure the [`LLGrammar::follow`] set is valid
+    ///**Dependencies:** depends on a valid [`LLGrammar::first`]
     pub fn calculate_follow(&mut self) {
         for id in self.rules.keys() {
             self.follow.entry(*id).or_default();
@@ -597,19 +623,18 @@ impl<K: Eq + Hash + Clone> IncSets<K> {
 
 #[cfg(test)]
 mod tests {
+    use super::{ExTerm, LLGrammar, NonTermId, TokList, Token};
+    use alloc::rc::Rc;
     use hashbrown::HashSet;
-use alloc::rc::Rc;
-    use super::{ExTerm,NonTermId,TokList, IncSets, Token};
 
-
-    /// Convenience: turn a slice into the `Rc<[Token<K>]>` expected by `IncSets`
+    /// Convenience: turn a slice into the `Rc<[Token<K>]>` expected by `LLGrammar`
     fn rc<K: Clone>(v: &[Token<K>]) -> TokList<K> {
         Rc::from(v.to_vec().into_boxed_slice())
     }
 
     /// Helper to insert a single-production rule
     fn add_rule<K: Eq + core::hash::Hash + Clone>(
-        g: &mut IncSets<K>,
+        g: &mut LLGrammar<K>,
         lhs: NonTermId,
         rhs: &[Token<K>],
     ) {
@@ -626,7 +651,7 @@ use alloc::rc::Rc;
     #[test]
     fn macro_safety_edge_cases() {
         // Grammar 0: S → 'a'
-        let mut g0: IncSets<char> = IncSets::new();
+        let mut g0: LLGrammar<char> = LLGrammar::new();
         add_rule(&mut g0, 0, &[Token::Term('a')]);
         assert!(
             g0.is_valid_macro(&g0.rules[&0][0].clone()),
@@ -634,7 +659,7 @@ use alloc::rc::Rc;
         );
 
         // Grammar 1: S → A; A → ε | 'a'
-        let mut g1: IncSets<char> = IncSets::new();
+        let mut g1: LLGrammar<char> = LLGrammar::new();
         add_rule(&mut g1, 0, &[Token::NonTerm(1)]); // S → A
         add_rule(&mut g1, 1, &[]); // A → ε
         add_rule(&mut g1, 1, &[Token::Term('a')]); // A → 'a'
@@ -644,7 +669,7 @@ use alloc::rc::Rc;
         );
 
         // Grammar 2: A → 'a' A | 'a'  (right recursion)
-        let mut g2: IncSets<char> = IncSets::new();
+        let mut g2: LLGrammar<char> = LLGrammar::new();
         add_rule(&mut g2, 0, &[Token::Term('a'), Token::NonTerm(0)]);
         add_rule(&mut g2, 0, &[Token::Term('a')]);
         assert!(
@@ -657,7 +682,7 @@ use alloc::rc::Rc;
         );
 
         // Grammar 3: A → B; B → C; C → 'c'  (multi-hop chain)
-        let mut g3: IncSets<char> = IncSets::new();
+        let mut g3: LLGrammar<char> = LLGrammar::new();
         add_rule(&mut g3, 0, &[Token::NonTerm(1)]); // A → B
         add_rule(&mut g3, 1, &[Token::NonTerm(2)]); // B → C
         add_rule(&mut g3, 2, &[Token::Term('c')]); // C → 'c'
@@ -689,7 +714,7 @@ use alloc::rc::Rc;
     ///  '{' '}' '[' ']' ',' ':' 's' (string) 'n' (number)
     #[test]
     fn macro_safety_json_like() {
-        let mut g: IncSets<char> = IncSets::new();
+        let mut g: LLGrammar<char> = LLGrammar::new();
 
         // VALUE → OBJECT | ARRAY | 's' | 'n'
         add_rule(&mut g, 0, &[Token::NonTerm(1)]);
@@ -767,9 +792,6 @@ use alloc::rc::Rc;
         assert!(!g.is_valid_macro(&g.rules[&4][1].clone())); // RESTMEMBERS → ε
     }
 
-
-    
-
     // --------------------------------------------------------------------------
 
     #[test]
@@ -789,7 +811,7 @@ use alloc::rc::Rc;
         //   C → ε
         //   Z → $
         //
-        let mut g: IncSets<char> = IncSets::new();
+        let mut g: LLGrammar<char> = LLGrammar::new();
 
         // S
         add_rule(&mut g, S, &[Token::NonTerm(A), Token::NonTerm(B)]);
@@ -838,7 +860,6 @@ use alloc::rc::Rc;
         assert_eq!(&g.first[&Z], &set(&[ExTerm::Eof]), "FIRST(Z)");
     }
 
-    
     // -------------------------------------------------------------------------
 
     #[test]
@@ -858,7 +879,7 @@ use alloc::rc::Rc;
         //   C  →  ε
         //
         // ---------------------------------------------------------------------
-        let mut g: IncSets<char> = IncSets::new();
+        let mut g: LLGrammar<char> = LLGrammar::new();
 
         // S rules
         add_rule(&mut g, S, &[Token::NonTerm(A), Token::NonTerm(B)]);
@@ -916,7 +937,7 @@ use alloc::rc::Rc;
         const A: usize = 1;
         const B: usize = 2;
 
-        let mut g: IncSets<char> = IncSets::new();
+        let mut g: LLGrammar<char> = LLGrammar::new();
         add_rule(&mut g, S, &[Token::Term('a'), Token::NonTerm(A)]);
         add_rule(&mut g, S, &[Token::Term('a'), Token::NonTerm(B)]);
         add_rule(&mut g, A, &[Token::Term('x')]);
@@ -925,9 +946,13 @@ use alloc::rc::Rc;
         g.add_start(S);
         g.calculate();
 
-        let err = g.get_checked_table().expect_err("should hit FIRST/FIRST clash");
+        let err = g
+            .get_checked_table()
+            .expect_err("should hit FIRST/FIRST clash");
         assert!(
-            err.first_first.iter().any(|(nt, sym, _)| *nt == S && *sym == ExTerm::Term('a')),
+            err.first_first
+                .iter()
+                .any(|(nt, sym, _)| *nt == S && *sym == ExTerm::Term('a')),
             "expected FIRST/FIRST conflict on 'a' in S"
         );
         // No FIRST/FOLLOW problems in this grammar
@@ -940,7 +965,7 @@ use alloc::rc::Rc;
         const S: usize = 0;
         const A: usize = 1;
 
-        let mut g: IncSets<char> = IncSets::new();
+        let mut g: LLGrammar<char> = LLGrammar::new();
         // S rules
         add_rule(&mut g, S, &[Token::NonTerm(A), Token::Term('x')]);
         add_rule(&mut g, S, &[Token::Term('y')]);
@@ -953,13 +978,13 @@ use alloc::rc::Rc;
         g.get_checked_table().unwrap();
     }
 
-     /// FIRST/FOLLOW:  A derives 'x' and ε, and ‘x’ also follows A in S → A 'x'
+    /// FIRST/FOLLOW:  A derives 'x' and ε, and ‘x’ also follows A in S → A 'x'
     #[test]
     fn detects_first_follow_conflict() {
         const S: usize = 0;
         const A: usize = 1;
 
-        let mut g: IncSets<char> = IncSets::new();
+        let mut g: LLGrammar<char> = LLGrammar::new();
         // S rules
         add_rule(&mut g, S, &[Token::NonTerm(A), Token::Term('x')]);
         add_rule(&mut g, S, &[Token::Term('y')]);
@@ -970,7 +995,9 @@ use alloc::rc::Rc;
         g.add_start(S);
         g.calculate();
 
-        let err = g.get_checked_table().expect_err("should hit FIRST/FOLLOW clash");
+        let err = g
+            .get_checked_table()
+            .expect_err("should hit FIRST/FOLLOW clash");
         assert!(
             err.first_follow
                 .iter()
