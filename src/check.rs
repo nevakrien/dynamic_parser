@@ -72,8 +72,8 @@
 //! being up‑to‑date – run [`LLGrammar::calculate`] or the fine‑grained variants
 //! yourself.
 
-use crate::parser::Terminal;
 use crate::check::hash::Hash;
+use crate::parser::Terminal;
 use crate::parser::Token as PToken;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -111,12 +111,10 @@ pub enum Token<K> {
     NonTerm(NonTermId),
 }
 
-
-
-impl<T: Terminal, F1: Fn(&mut State, T), State> From<PToken<T,F1, State>> for Token<T::Key> {
-    fn from(tok:PToken<T,F1, State>) -> Self {
+impl<T: Terminal, F1: Fn(&mut State, T), State> From<PToken<T, F1, State>> for Token<T::Key> {
+    fn from(tok: PToken<T, F1, State>) -> Self {
         match tok {
-            PToken::Term { key, ..}=>Token::Term(key),
+            PToken::Term { key, .. } => Token::Term(key),
             PToken::NonTerm(id) => Token::NonTerm(id),
             PToken::Eof => Token::Eof,
         }
@@ -308,6 +306,9 @@ pub struct LLGrammar<K: Eq + Hash + Clone> {
     /// FIRST(A)  (includes `Empty` iff A is nullable)
     pub first: HashMap<NonTermId, HashSet<ExTerm<K>>>,
 
+    pub follow_update: HashMap<NonTermId, HashSet<NonTermId>>,
+
+    /// First(w) for sequnces
     pub first_seq: HashMap<TokList<K>, HashSet<ExTerm<K>>>,
 
     /// FOLLOW(A) (may contain `ExTerm::Eof`)
@@ -323,6 +324,7 @@ impl<K: Eq + Hash + Clone> Default for LLGrammar<K> {
             first: HashMap::new(),
             first_seq: HashMap::new(),
             follow: HashMap::new(),
+            follow_update: HashMap::new(),
             peeks: HashMap::new(),
             rules: HashMap::new(),
         }
@@ -330,14 +332,14 @@ impl<K: Eq + Hash + Clone> Default for LLGrammar<K> {
 }
 
 impl<K: Eq + Hash + Clone> LLGrammar<K> {
-    pub fn from_rules(iter:impl Iterator<Item = (NonTermId,TokList<K>)>)->Self{
+    pub fn from_rules(iter: impl Iterator<Item = (NonTermId, TokList<K>)>) -> Self {
         let mut ans = Self::new();
         ans.add_rules(iter);
         ans
     }
 
-    pub fn add_rules(&mut self, iter:impl Iterator<Item = (NonTermId,TokList<K>)>){
-        for (k,v) in iter {
+    pub fn add_rules(&mut self, iter: impl Iterator<Item = (NonTermId, TokList<K>)>) {
+        for (k, v) in iter {
             self.rules.entry(k).or_default().push(v);
         }
     }
@@ -351,6 +353,7 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
         self.first.values_mut().for_each(HashSet::clear);
         self.first_seq.clear();
         self.follow.values_mut().for_each(HashSet::clear);
+        self.follow_update.values_mut().for_each(HashSet::clear);
         self.peeks.clear();
     }
 
@@ -360,11 +363,7 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
         self.follow.entry(id).or_default().insert(ExTerm::Eof);
     }
 
-    pub fn add_rule(
-        self: &mut LLGrammar<K>,
-        lhs: NonTermId,
-        rhs: Rc<[Token<K>]>,
-    ) {
+    pub fn add_rule(self: &mut LLGrammar<K>, lhs: NonTermId, rhs: Rc<[Token<K>]>) {
         self.rules.entry(lhs).or_default().push(rhs);
     }
 
@@ -580,44 +579,55 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
     ///makes sure the [`LLGrammar::follow`] set is valid
     ///**Dependencies:** depends on a valid [`LLGrammar::first`]
     pub fn calculate_follow(&mut self) {
+        self.follow_update.clear();
+        self.calculate_follow_pass1();
+        unsafe { self._calculate_follow() }
+    }
+
+    fn calculate_follow_pass1(&mut self) {
         for id in self.rules.keys() {
             self.follow.entry(*id).or_default();
         }
-
-        self._calculate_follow()
-    }
-
-    fn _calculate_follow(&mut self) {
-        let mut changed = false;
 
         for (target, tokens) in iterate_rules(&self.rules) {
             for (i, t) in tokens.iter().enumerate().rev() {
                 if let Token::NonTerm(id) = t {
                     let first = get_first_set(&tokens[i + 1..], &mut self.first_seq, &self.first);
+
                     let spot = self.follow.get_mut(id).unwrap();
                     for x in first.iter() {
                         if *x == ExTerm::Empty {
                             continue;
                         }
-                        changed |= spot.insert(x.clone());
+                        spot.insert(x.clone());
                     }
 
                     if *id != target && first.contains(&ExTerm::Empty) {
-                        //Safety:we just checked id!=target
-                        if let [Some(prod), Some(tgt)] =
-                            unsafe { self.follow.get_many_unchecked_mut([id, &target]) }
-                        {
-                            for x in tgt.iter() {
-                                changed |= prod.insert(x.clone());
-                            }
-                        }
+                        self.follow_update.entry(target).or_default().insert(*id);
                     }
+                }
+            }
+        }
+    }
+
+    unsafe fn _calculate_follow(&mut self) {
+        let mut changed = false;
+
+        for (source, dests) in self.follow_update.iter() {
+            for d in dests.iter() {
+                let [Some(source), Some(dest)] =
+                    (unsafe { self.follow.get_many_unchecked_mut([source, d]) })
+                else {
+                    panic!("fogrgot inilizing")
+                };
+                for x in source.iter() {
+                    changed |= dest.insert(x.clone());
                 }
             }
         }
 
         if changed {
-            self._calculate_follow()
+            unsafe { self._calculate_follow() }
         }
     }
 }
