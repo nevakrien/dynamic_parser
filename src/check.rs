@@ -118,6 +118,7 @@ impl<T: Terminal, F1: Fn(&mut State, T), State> From<PToken<T,F1, State>> for To
         match tok {
             PToken::Term { key, ..}=>Token::Term(key),
             PToken::NonTerm(id) => Token::NonTerm(id),
+            PToken::Eof => Token::Eof,
         }
     }
 }

@@ -41,7 +41,7 @@ pub type NonTermId = usize;
 
 #[derive(Debug,PartialEq)]
 pub enum Token<T: Terminal, F: Fn(&mut State, T), State> {
-    // Eof,
+    Eof,
     Term {
         key: <T as Terminal>::Key,
         callback: Option<F>,
@@ -58,7 +58,7 @@ where
     fn clone(&self) -> Self {
         match self {
             Self::NonTerm(id) => Self::NonTerm(*id),
-            // Token::Eof => Token::Eof,
+            Token::Eof => Token::Eof,
             Self::Term { key, callback, _ph } => Self::Term {
                 key: key.clone(),
                 callback: callback.clone(),
@@ -98,6 +98,7 @@ where
 			match e {
 			    Token::Term{key,..} => CToken::Term(key.clone()),
 			    Token::NonTerm(id) => CToken::NonTerm(*id),
+			    Token::Eof => CToken::Eof,
 			}
 		}).collect()
 	}
@@ -126,7 +127,7 @@ where
 {
     explicit: HashMap<<Term as Terminal>::Key, Prod<Term, State, F1, F2>>,
     empty: Option<Prod<Term, State, F1, F2>>,
-    // eof: Option<Prod<Term, State, F1, F2>>,
+    eof: Option<Prod<Term, State, F1, F2>>,
 }
 
 impl<Term, State, F1, F2> Default for ParseTable<Term, State, F1, F2>
@@ -136,7 +137,7 @@ where
     F2: Fn(&mut State, Term),
 {
 
-fn default() -> Self { Self{explicit:HashMap::new(),empty:None}}
+fn default() -> Self { Self{explicit:HashMap::new(),empty:None,eof:None}}
 }
 
 impl<Term, State, F1, F2> ParseTable<Term, State, F1, F2>
@@ -147,8 +148,8 @@ where
 {
     pub fn get_prod(&self, key: Option<&Term::Key>) -> Option<&Prod<Term, State, F1, F2>> {
         match key {
-            // None => self.eof.as_ref().or(self.empty.as_ref()),
-            None => self.empty.as_ref(),
+            None => self.eof.as_ref().or(self.empty.as_ref()),
+            // None => self.empty.as_ref(),
             Some(t) => self.explicit.get(t).or(self.empty.as_ref()),
         }
     }
@@ -180,9 +181,12 @@ where
         input: &mut impl Iterator<Item = Term>,
     ) -> Result<(), ParseError<Term>> {
         let mut input = input.peekable();
-
+        // self.partial_parse(target, state, &mut input)
         self.partial_parse(target, state, &mut input)?;
 
+        //on a proper grammar this never happens
+        //however if someone forgot EOF on the target this does happen
+        //note that in that case we also have potential infinite loops 
         match input.next() {
             None => Ok(()),
             Some(found) => Err(ParseError {
@@ -213,14 +217,14 @@ where
 
         for e in prod.elements.clone().iter() {
             match e {
-                // Token::Eof => {
-                //     if let Some(found) = input.next() {
-                //         return Err(ParseError {
-                //             found: Some(found),
-                //             expected: vec![None],
-                //         });
-                //     }
-                // }
+                Token::Eof => {
+                    if let Some(found) = input.next() {
+                        return Err(ParseError {
+                            found: Some(found),
+                            expected: vec![None],
+                        });
+                    }
+                }
                 Token::Term { key, callback, .. } => {
                     let Some(found) = input.next() else {
                         return Err(ParseError {
@@ -314,7 +318,9 @@ where
 
 			for (ex,id) in m.into_iter(){
 				match ex {
-				    ExTerm::Eof => {/*this is just a ciriousity*/}
+				    ExTerm::Eof => {
+				    	spot.eof = Some(rules[id].clone())
+				    }
 				    ExTerm::Empty => {
 				    	spot.empty = Some(rules[id].clone());
 				    }
@@ -532,7 +538,7 @@ mod tests {
         let mut factor = ParseTable {
             explicit: HashMap::new(),
             empty: None,
-            // eof: None,
+            eof: None,
         };
         factor.explicit.insert(
             Key::Int,
@@ -545,7 +551,7 @@ mod tests {
         let mut term_tail = ParseTable {
             explicit: HashMap::new(),
             empty: Some(prod(vec![], ProdCb::Report("term_trail -> e"))),
-            // eof: None,
+            eof: None,
         };
         // '*' branch
         term_tail.explicit.insert(
@@ -560,7 +566,7 @@ mod tests {
         let mut term = ParseTable {
             explicit: HashMap::new(),
             empty: None,
-            // eof: None,
+            eof: None,
         };
         term.explicit.insert(
             Key::Int,
@@ -575,7 +581,7 @@ mod tests {
         let mut expr_tail = ParseTable {
             explicit: HashMap::new(),
             empty: Some(prod(vec![], ProdCb::Report("expr_trail -> e"))),
-            // eof: None,
+            eof: None,
         };
         expr_tail.explicit.insert(
             Key::Plus,
@@ -585,17 +591,17 @@ mod tests {
             ),
         );
 
-        // --- EXPR → Term ExprTail ----------------------------------------------
+        // --- EXPR → Term ExprTail Eof----------------------------------------------
         //  (top‑level cannot derive ε)
         let mut expr = ParseTable {
             explicit: HashMap::new(),
             empty: None,
-            // eof: None,
+            eof: None,
         };
         expr.explicit.insert(
             Key::Int,
             prod(
-                vec![NonTerm(TERM), NonTerm(EXPR_TAIL)],
+                vec![NonTerm(TERM), NonTerm(EXPR_TAIL),Token::Eof],
                 ProdCb::Report("expr -> term expr_trail"),
             ),
         );
@@ -823,8 +829,8 @@ mod dynamic_parser_tests {
         rules.push((EXPR_TAIL, prod(vec![t_plus.clone(), nt(TERM), nt(EXPR_TAIL)], ProdCb::Add)));
         rules.push((EXPR_TAIL, prod(vec![], ProdCb::Report)));
 
-        // EXPR → TERM EXPR_TAIL    (start)
-        rules.push((EXPR, prod(vec![nt(TERM), nt(EXPR_TAIL)], ProdCb::Report)));
+        // EXPR → TERM EXPR_TAIL EOF   (start)
+        rules.push((EXPR, prod(vec![nt(TERM), nt(EXPR_TAIL),Token::Eof], ProdCb::Report)));
 
         // Build dynamic parser from rules and materialize parse tables
         let mut dp: P = DynamicParser::new(EXPR, rules);
