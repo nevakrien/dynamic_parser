@@ -1359,73 +1359,96 @@ mod c_funptr_ambiguity {
     }
 
     // -----------------------------------------------------------------------------
-// 🧨 extra negative-tests to stress the LL(1) + macro checker
-// (append them to c_funptr_ambiguity after the earlier tests)
-// -----------------------------------------------------------------------------
+    // 🧨 extra negative-tests to stress the LL(1) + macro checker
+    // (append them to c_funptr_ambiguity after the earlier tests)
+    // -----------------------------------------------------------------------------
 
-// helper: clone build_parser’s rules, then splice in extra broken ones
-fn rebuild_with(mut more: Vec<(NonTermId,
-                               Prod<Tok, CState, ProdCb, TermCb>)>)
-    -> DynamicParser<Tok, CState, ProdCb, TermCb>
-{
-    // start with the canonical good grammar
-    let base = build_parser();
+    // helper: clone build_parser’s rules, then splice in extra broken ones
+    fn rebuild_with(
+        mut more: Vec<(NonTermId, Prod<Tok, CState, ProdCb, TermCb>)>,
+    ) -> DynamicParser<Tok, CState, ProdCb, TermCb> {
+        // start with the canonical good grammar
+        let base = build_parser();
 
-    // pull out its rule list
-    let mut rules: Vec<_> =
-        base.rules.into_iter().flat_map(|(nt, v)| v.into_iter().map(move |p| (nt, p))).collect();
+        // pull out its rule list
+        let mut rules: Vec<_> = base
+            .rules
+            .into_iter()
+            .flat_map(|(nt, v)| v.into_iter().map(move |p| (nt, p)))
+            .collect();
 
-    // extend
-    rules.append(&mut more);
+        // extend
+        rules.append(&mut more);
 
-    let mut dp = DynamicParser::<Tok, CState, ProdCb, TermCb>::new(TRANS_UNIT, rules);
-    dp.clear_grammar_cach();            // sync rules → grammar cache
-    dp
-}
+        let mut dp = DynamicParser::<Tok, CState, ProdCb, TermCb>::new(TRANS_UNIT, rules);
+        dp.clear_grammar_cach(); // sync rules → grammar cache
+        dp
+    }
 
-	// -------------------------------------------------------------------------
-	// 1️⃣  FIRST/FIRST conflict hidden by shared prefix TYPE_SPEC
-	// -------------------------------------------------------------------------
-	#[test]
-	fn hidden_first_first_detected() {
-	    const BROKEN: usize = 100;
+    // -------------------------------------------------------------------------
+    // 1️⃣  FIRST/FIRST conflict hidden by shared prefix TYPE_SPEC
+    // -------------------------------------------------------------------------
+    #[test]
+    fn hidden_first_first_detected() {
+        const BROKEN: usize = 100;
 
-	    // BROKEN → type-spec Id ';'  |  TypeName Id ';'
-	    let mut extra = Vec::new();
-	    extra.push((BROKEN,
-	        prod(vec![nt(TYPE_SPEC), tm(Key::Id, None), tm(Key::Semi, None)], None)));
-	    extra.push((BROKEN,
-	        prod(vec![tm(Key::TypeName, None), tm(Key::Id, None), tm(Key::Semi, None)], None)));
+        // BROKEN → type-spec Id ';'  |  TypeName Id ';'
+        let mut extra = Vec::new();
+        extra.push((
+            BROKEN,
+            prod(
+                vec![nt(TYPE_SPEC), tm(Key::Id, None), tm(Key::Semi, None)],
+                None,
+            ),
+        ));
+        extra.push((
+            BROKEN,
+            prod(
+                vec![
+                    tm(Key::TypeName, None),
+                    tm(Key::Id, None),
+                    tm(Key::Semi, None),
+                ],
+                None,
+            ),
+        ));
 
-	    // attach BROKEN as new top-level
-	    extra.push((TRANS_UNIT, prod(vec![nt(BROKEN), Token::Eof], None)));
+        // attach BROKEN as new top-level
+        extra.push((TRANS_UNIT, prod(vec![nt(BROKEN), Token::Eof], None)));
 
-	    let mut dp = rebuild_with(extra);
-	    assert!(dp.generate_parser().is_err(),
-	            "FIRST/FIRST overlap through TYPE_SPEC was *not* caught");
-	}
+        let mut dp = rebuild_with(extra);
+        assert!(
+            dp.generate_parser().is_err(),
+            "FIRST/FIRST overlap through TYPE_SPEC was *not* caught"
+        );
+    }
 
-	// -------------------------------------------------------------------------
-	// 2️⃣  FIRST/FOLLOW ε-nullable conflict
-	// -------------------------------------------------------------------------
-	#[test]
-	fn nullable_first_follow_detected() {
-	    const A: usize = 101;
-	    const S: usize = 102;
+    // -------------------------------------------------------------------------
+    // 2️⃣  FIRST/FOLLOW ε-nullable conflict
+    // -------------------------------------------------------------------------
+    #[test]
+    fn nullable_first_follow_detected() {
+        const A: usize = 101;
+        const S: usize = 102;
 
-	    let mut extra = Vec::new();
+        let mut extra = Vec::new();
 
-	    // S → A Id ';'
-	    extra.push((S, prod(vec![nt(A), tm(Key::Id, None), tm(Key::Semi, None)], None)));
-	    // A → ε   |  Id
-	    extra.push((A, prod(Vec::new(), None)));                   // ε
-	    extra.push((A, prod(vec![tm(Key::Id, None)], None)));
+        // S → A Id ';'
+        extra.push((
+            S,
+            prod(vec![nt(A), tm(Key::Id, None), tm(Key::Semi, None)], None),
+        ));
+        // A → ε   |  Id
+        extra.push((A, prod(Vec::new(), None))); // ε
+        extra.push((A, prod(vec![tm(Key::Id, None)], None)));
 
-	    // make S the new start
-	    extra.push((TRANS_UNIT, prod(vec![nt(S), Token::Eof], None)));
+        // make S the new start
+        extra.push((TRANS_UNIT, prod(vec![nt(S), Token::Eof], None)));
 
-	    let mut dp = rebuild_with(extra);
-	    assert!(dp.generate_parser().is_err(),
-	            "nullable FIRST/FOLLOW conflict slipped through");
-	}
+        let mut dp = rebuild_with(extra);
+        assert!(
+            dp.generate_parser().is_err(),
+            "nullable FIRST/FOLLOW conflict slipped through"
+        );
+    }
 }

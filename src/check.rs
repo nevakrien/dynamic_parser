@@ -75,6 +75,7 @@
 use crate::check::hash::Hash;
 use crate::parser::Terminal;
 use crate::parser::Token as PToken;
+use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::hash;
@@ -236,6 +237,34 @@ fn make_first_set<'a, K: Hash + Eq + Clone>(
                 first_seq.entry(tokens.clone()).or_insert(set)
             } else {
                 first_seq.entry(tokens.clone()).or_insert(f.clone())
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn update_follow_con<K: Hash + Eq + Clone>(
+    target: NonTermId,
+    tokens: &[Token<K>],
+    first: &HashMap<NonTermId, HashSet<ExTerm<K>>>,
+    first_seq: &mut HashMap<TokList<K>, HashSet<ExTerm<K>>>,
+    follow: &mut HashMap<NonTermId, HashSet<ExTerm<K>>>,
+    follow_update: &mut HashMap<NonTermId, HashSet<NonTermId>>,
+) {
+    for (i, t) in tokens.iter().enumerate().rev() {
+        if let Token::NonTerm(id) = t {
+            let first = get_first_set(&tokens[i + 1..], first_seq, first);
+
+            let spot = follow.entry(*id).or_default();
+            for x in first.iter() {
+                if *x == ExTerm::Empty {
+                    continue;
+                }
+                spot.insert(x.clone());
+            }
+
+            if *id != target && first.contains(&ExTerm::Empty) {
+                follow_update.entry(target).or_default().insert(*id);
             }
         }
     }
@@ -579,55 +608,97 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
     ///makes sure the [`LLGrammar::follow`] set is valid
     ///**Dependencies:** depends on a valid [`LLGrammar::first`]
     pub fn calculate_follow(&mut self) {
-        self.follow_update.clear();
         self.calculate_follow_pass1();
-        unsafe { self._calculate_follow() }
+
+        let queue: VecDeque<NonTermId> = self.follow.keys().copied().collect();
+        self.calculate_follow_for(queue)
+    }
+
+    ///add a specific productions follow set
+    ///**Dependencies:** depends on a valid [`LLGrammar::first`] that has the new first tokens
+    /// as well as [`LLGrammar::follow`] with previous tokens
+    pub fn add_follow_of(&mut self, id: NonTermId, tokens: &[Token<K>]) {
+        self.follow.entry(id).or_default();
+        update_follow_con(
+            id,
+            tokens,
+            &self.first,
+            &mut self.first_seq,
+            &mut self.follow,
+            &mut self.follow_update,
+        );
+
+        let queue: VecDeque<NonTermId> = core::iter::once(id).collect();
+        self.calculate_follow_for(queue)
     }
 
     fn calculate_follow_pass1(&mut self) {
-        for id in self.rules.keys() {
-            self.follow.entry(*id).or_default();
-        }
-
+        self.follow_update.clear();
         for (target, tokens) in iterate_rules(&self.rules) {
-            for (i, t) in tokens.iter().enumerate().rev() {
-                if let Token::NonTerm(id) = t {
-                    let first = get_first_set(&tokens[i + 1..], &mut self.first_seq, &self.first);
-
-                    let spot = self.follow.get_mut(id).unwrap();
-                    for x in first.iter() {
-                        if *x == ExTerm::Empty {
-                            continue;
-                        }
-                        spot.insert(x.clone());
-                    }
-
-                    if *id != target && first.contains(&ExTerm::Empty) {
-                        self.follow_update.entry(target).or_default().insert(*id);
-                    }
-                }
-            }
+            update_follow_con(
+                target,
+                tokens,
+                &self.first,
+                &mut self.first_seq,
+                &mut self.follow,
+                &mut self.follow_update,
+            );
         }
     }
 
-    unsafe fn _calculate_follow(&mut self) {
-        let mut changed = false;
+    // unsafe fn _calculate_follow(&mut self) {
+    //     let mut changed = false;
 
-        for (source, dests) in self.follow_update.iter() {
-            for d in dests.iter() {
-                let [Some(source), Some(dest)] =
-                    (unsafe { self.follow.get_many_unchecked_mut([source, d]) })
-                else {
-                    panic!("fogrgot inilizing")
-                };
-                for x in source.iter() {
-                    changed |= dest.insert(x.clone());
+    //     for (source, dests) in self.follow_update.iter() {
+    //         for d in dests.iter() {
+    //             let [Some(source), Some(dest)] =
+    //                 (unsafe { self.follow.get_many_unchecked_mut([source, d]) })
+    //             else {
+    //                 panic!("fogrgot inilizing")
+    //             };
+    //             for x in source.iter() {
+    //                 changed |= dest.insert(x.clone());
+    //             }
+    //         }
+    //     }
+
+    //     if changed {
+    //         unsafe { self._calculate_follow() }
+    //     }
+    // }
+
+    ///[]
+    fn calculate_follow_for(&mut self, mut queue: VecDeque<NonTermId>) {
+        let mut in_queue: HashSet<NonTermId> = queue.iter().copied().collect();
+
+        while let Some(u) = queue.pop_front() {
+            in_queue.remove(&u);
+
+            // clone is cheap: just the pointers & hashes, not the Sym values
+            let src: Vec<ExTerm<K>> = self.follow[&u].iter().cloned().collect();
+
+            // for every edge  u → v
+            if let Some(dests) = self.follow_update.get(&u) {
+                for &v in dests {
+                    let dest = self
+                        .follow
+                        .get_mut(&v)
+                        .expect("forgot initialising FOLLOW(v)");
+
+                    // merge src into dest, remember whether dest changed
+                    let mut grew = false;
+                    for sym in &src {
+                        if dest.insert(sym.clone()) {
+                            grew = true;
+                        }
+                    }
+
+                    // if FOLLOW(v) grew, (re)-enqueue v exactly once
+                    if grew && in_queue.insert(v) {
+                        queue.push_back(v);
+                    }
                 }
             }
-        }
-
-        if changed {
-            unsafe { self._calculate_follow() }
         }
     }
 }
