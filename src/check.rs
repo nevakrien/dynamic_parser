@@ -138,19 +138,19 @@ fn calculate_peeks<K>(
     visited: &mut HashSet<NonTermId>,
 ) -> bool {
     let Some(t) = toks.last() else {
-        return false;
+        return true;
     };
 
     let id = match t {
-        Token::Eof => return false,
-        Token::Term(_) => return true,
+        Token::Eof => return true,
+        Token::Term(_) => return false,
         Token::NonTerm(id) => id,
     };
 
     if !visited.insert(*id) {
         //be optimistic to avoid cycles
         //however for the outer call this is valid
-        return true;
+        return false;
     }
 
     if let Some(ans) = peeks.get(id) {
@@ -158,15 +158,15 @@ fn calculate_peeks<K>(
     }
 
     for toks in rules[id].iter() {
-        if !calculate_peeks(toks, rules, peeks, visited) {
-            peeks.insert(*id, false);
-            return false;
+        if calculate_peeks(toks, rules, peeks, visited) {
+            peeks.insert(*id, true);
+            return true;
         }
     }
 
-    //we cant update since we have false positives
+    //we cant update since we have false negatives
     //final result should be good though
-    true
+    false
 }
 
 /// Retrieves (or computes and memoises) the **FIRST** set of a *slice* of
@@ -335,15 +335,15 @@ pub struct LLGrammar<K: Eq + Hash + Clone> {
     /// FIRST(A)  (includes `Empty` iff A is nullable)
     pub first: HashMap<NonTermId, HashSet<ExTerm<K>>>,
 
-    pub follow_update: HashMap<NonTermId, HashSet<NonTermId>>,
-
-    /// First(w) for sequnces
+        /// First(w) for sequnces
     pub first_seq: HashMap<TokList<K>, HashSet<ExTerm<K>>>,
 
     /// FOLLOW(A) (may contain `ExTerm::Eof`)
     pub follow: HashMap<NonTermId, HashSet<ExTerm<K>>>,
 
-    /// whether or not a non terminal does not peek the next input
+    pub follow_update: HashMap<NonTermId, HashSet<NonTermId>>,
+
+    /// whether or not a non terminal peek the next input
     pub peeks: HashMap<NonTermId, bool>,
 }
 
@@ -410,16 +410,16 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
         };
 
         if let Some(ans) = self.peeks.get(id) {
-            return *ans;
+            return !*ans;
         }
 
         let mut visited = HashSet::new();
-        let ans = calculate_peeks(toks, &self.rules, &mut self.peeks, &mut visited);
+        let ans = !calculate_peeks(toks, &self.rules, &mut self.peeks, &mut visited);
         if ans {
             //now we have checked all last extended terminals are not empty
             //this means that all visited non terminals are also non empty
             for id in visited {
-                self.peeks.insert(id, true);
+                self.peeks.insert(id, false);
             }
         }
 
@@ -680,10 +680,7 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
             // for every edge  u → v
             if let Some(dests) = self.follow_update.get(&u) {
                 for &v in dests {
-                    let dest = self
-                        .follow
-                        .get_mut(&v)
-                        .expect("forgot initialising FOLLOW(v)");
+                    let dest = self.follow.entry(v).or_default();
 
                     // merge src into dest, remember whether dest changed
                     let mut grew = false;
