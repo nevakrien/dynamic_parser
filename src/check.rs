@@ -325,7 +325,7 @@ pub struct GrammerErrors<K> {
     pub first_follow: Vec<(NonTermId, HashSet<ExTerm<K>>)>,
 }
 
-#[derive(Debug, Clone,PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct PeekInfo {
     pub peek_update: HashMap<NonTermId, HashSet<NonTermId>>,
     /// whether or not a non terminal peek the next input
@@ -333,20 +333,23 @@ pub struct PeekInfo {
 }
 
 impl PeekInfo {
-    pub fn is_valid_macro<K>(&self,toks: &[Token<K>])->bool {
-        match toks.last(){
-            None|Some(Token::Eof)=>false,
-            Some(Token::NonTerm(id))=>!self.peeks.contains(id),
-            _=>true,
+    pub fn is_valid_macro<K>(&self, toks: &[Token<K>]) -> bool {
+        match toks.last() {
+            None | Some(Token::Eof) => false,
+            Some(Token::NonTerm(id)) => !self.peeks.contains(id),
+            _ => true,
         }
     }
-    pub fn add_rule<K>(&mut self,id:NonTermId,toks:&[Token<K>]){
-        self.add_rules(core::iter::once((id,toks)))
+    pub fn add_rule<K>(&mut self, id: NonTermId, toks: &[Token<K>]) {
+        self.add_rules(core::iter::once((id, toks)))
     }
-    pub fn add_rules<'a, K: 'a>(&mut self,rules:impl Iterator<Item=(NonTermId,&'a [Token<K>])>){
-        let mut ids =  VecDeque::new();
-        for (id,toks) in rules {
-            if self.add_rule_static(id,toks){
+    pub fn add_rules<'a, K: 'a>(
+        &mut self,
+        rules: impl Iterator<Item = (NonTermId, &'a [Token<K>])>,
+    ) {
+        let mut ids = VecDeque::new();
+        for (id, toks) in rules {
+            if self.add_rule_static(id, toks) {
                 ids.push_back(id);
             }
         }
@@ -354,18 +357,22 @@ impl PeekInfo {
     }
     fn add_rule_static<K>(&mut self, target: NonTermId, toks: &[Token<K>]) -> bool {
         match toks.last() {
-            None|Some(Token::Eof) => self.peeks.insert(target),
-            Some(Token::NonTerm(id)) => if self.peek_update.entry(target).or_default().insert(*id) {
-                self.peeks.contains(id)
-            }else {false},
+            None | Some(Token::Eof) => self.peeks.insert(target),
+            Some(Token::NonTerm(id)) => {
+                if self.peek_update.entry(target).or_default().insert(*id) {
+                    self.peeks.contains(id)
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
 
-    fn update_loop(&mut self,mut ids:VecDeque<NonTermId>){
-        while let Some(id) = ids.pop_front(){
+    fn update_loop(&mut self, mut ids: VecDeque<NonTermId>) {
+        while let Some(id) = ids.pop_front() {
             if self.peeks.contains(&id) {
-                for other in self.peek_update.entry(id).or_default().iter(){
+                for other in self.peek_update.entry(id).or_default().iter() {
                     if self.peeks.insert(*other) {
                         ids.push_back(*other);
                     }
@@ -385,6 +392,10 @@ pub struct LLGrammar<K: Eq + Hash + Clone> {
     /// FIRST(A)  (includes `Empty` iff A is nullable)
     pub first: HashMap<NonTermId, HashSet<ExTerm<K>>>,
 
+    pub first_update: HashMap<NonTermId, HashSet<NonTermId>>,
+
+    pub null_pending: HashMap<NonTermId, Vec<(NonTermId, ProdId, usize)>>,
+
     /// First(w) for sequnces
     pub first_seq: HashMap<TokList<K>, HashSet<ExTerm<K>>>,
 
@@ -392,7 +403,6 @@ pub struct LLGrammar<K: Eq + Hash + Clone> {
     pub follow: HashMap<NonTermId, HashSet<ExTerm<K>>>,
 
     pub follow_update: HashMap<NonTermId, HashSet<NonTermId>>,
-
     // whether or not a non terminal peek the next input
     // pub peeks: HashMap<NonTermId, bool>,
 }
@@ -404,6 +414,8 @@ impl<K: Eq + Hash + Clone> Default for LLGrammar<K> {
             first_seq: HashMap::new(),
             follow: HashMap::new(),
             follow_update: HashMap::new(),
+            null_pending:HashMap::new(),
+            first_update:HashMap::new(),
             // peeks: HashMap::new(),
             rules: HashMap::new(),
         }
@@ -430,14 +442,17 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
     /// Clears all previously computed information.
     pub fn flush(&mut self) {
         self.first.values_mut().for_each(HashSet::clear);
+        self.first_update.values_mut().for_each(HashSet::clear);
+        self.null_pending.clear();
+
         self.first_seq.clear();
         self.follow.values_mut().for_each(HashSet::clear);
         self.follow_update.values_mut().for_each(HashSet::clear);
         // self.peeks.clear();
     }
 
-    pub fn update_peek(&self,p:&mut PeekInfo){
-        p.add_rules(iterate_rules(&self.rules).map(|(i,r)| (i,&**r)));
+    pub fn update_peek(&self, p: &mut PeekInfo) {
+        p.add_rules(iterate_rules(&self.rules).map(|(i, r)| (i, &**r)));
     }
 
     /// Inserts **$** into FOLLOW(`id`).  Must be invoked **once** on the start
@@ -541,8 +556,10 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
     ///makes sure the [`LLGrammar::first`] set is valid
     pub fn calculate_first(&mut self) {
         self.first_seq.clear();
-        self.calculate_first_terminals();
-        self.calculate_first_non_terminals()
+        let v = self.calculate_first_part1();
+        self.calculate_first_nulls(v.clone());
+        self.calculate_first_rest(v)
+        // self.calculate_first_non_terminals()
     }
 
     ///caches all grammer first sets rules into [`LLGrammar::first_seq`]
@@ -552,11 +569,14 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
         }
     }
 
-    pub fn calculate_first_terminals(&mut self) {
+    fn calculate_first_part1(&mut self) -> VecDeque<NonTermId> {
+        let mut ans = VecDeque::new();
+
         for (target, prods) in self.rules.iter() {
+            ans.push_back(*target);
             let set = self.first.entry(*target).or_default();
 
-            for tokens in prods {
+            for (i, tokens) in prods.iter().enumerate() {
                 match tokens.first() {
                     None => {
                         set.insert(ExTerm::Empty);
@@ -569,95 +589,177 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
                         set.insert(ExTerm::Eof);
                     }
 
-                    Some(Token::NonTerm(_)) => {}
+                    Some(Token::NonTerm(id)) => {
+                        self.first_update.entry(*id).or_default().insert(*target);
+                        self.null_pending
+                            .entry(*id)
+                            .or_default()
+                            .push((*target, i, 0));
+                    }
+                }
+            }
+        }
+
+        ans
+    }
+
+    fn calculate_first_nulls(&mut self, mut queue: VecDeque<NonTermId>) {
+        while let Some(id) = queue.pop_front() {
+            if self.first[&id].contains(&ExTerm::Empty) {
+                let Some(s) = self.null_pending.get(&id) else {
+                    continue;
+                };
+                let iter: Vec<_> =s.iter().cloned().collect();
+                'outer: for (other, prodid, mut loc) in iter {
+                    let toks = self.rules[&other][prodid].clone();
+                    while let Some(t) = toks.get(loc){
+                        match t{
+                            Token::Term(k)=>{
+                                self.first.entry(other).or_default().insert(ExTerm::Term(k.clone())); 
+                                continue 'outer
+
+                            },
+                            Token::Eof => {
+                                self.first.entry(other).or_default().insert(ExTerm::Eof); 
+                                continue 'outer
+                            }
+                            Token::NonTerm(r) => {
+                                self.first_update.entry(*r).or_default().insert(other);
+                                if self.first.entry(*r).or_default().contains(&ExTerm::Empty){
+                                    loc+=1;
+                                    continue;
+                                }
+
+                                self.null_pending.entry(*r).or_default().push((other, prodid, loc));
+                                continue 'outer
+
+                            } 
+                        }
+                    }
+
+                    self.first.entry(other).or_default().insert(ExTerm::Empty);
+                    queue.push_back(other);
                 }
             }
         }
     }
 
-    pub fn calculate_first_non_terminals(&mut self) {
-        let mut changed = false;
+    fn calculate_first_rest(&mut self, mut queue: VecDeque<NonTermId>){
+        let mut in_queue = HashSet::new();
+        for i in queue.iter().cloned(){
+            in_queue.insert(i);
+        }
 
-        //we need all these entries there already
-        // for id in self.rules.keys() {
-        //     self.first.entry(*id).or_default();
-        // }
-
-        for (target, tokens) in iterate_rules::<K>(&self.rules) {
-            //skip terminals since they were done already
-            let Some(Token::NonTerm(id)) = tokens.first() else {
+        while let Some(id) = queue.pop_front(){
+            in_queue.remove(&id);
+            let Some(targets) = self.first_update.get(&id) else{
+                continue;
+            };
+            let Some(first) = self.first.get(&id) else{
                 continue;
             };
 
-            //loop empty A style rules untill we get term A style
-            let mut id = id;
-            let mut loc = 0;
-            loop {
-                match self.first[id].contains(&ExTerm::Empty) {
-                    false => {
-                        if *id == target {
-                            break;
-                        }
+            let first :Vec<_>= first.iter().cloned().collect();
 
-                        //Safety:we just checked id!=target
-                        let [Some(other), Some(me)] =
-                            (unsafe { self.first.get_many_unchecked_mut([id, &target]) })
-                        else {
-                            break;
-                        };
-
-                        for item in other.iter().cloned() {
-                            changed |= me.insert(item);
-                        }
-
-                        break;
+            for other in targets {
+                let set = self.first.entry(*other).or_default();
+                let mut changed = false;
+                for t in first.iter() {
+                    if *t!=ExTerm::Empty{
+                        changed|=set.insert(t.clone());
                     }
-                    true => {
-                        if *id != target {
-                            //Safety:we just checked id!=target
-                            if let [Some(other), Some(me)] =
-                                unsafe { self.first.get_many_unchecked_mut([id, &target]) }
-                            {
-                                for item in other.iter().cloned() {
-                                    if item != ExTerm::Empty {
-                                        changed |= me.insert(item);
-                                    }
-                                }
-                            };
-                        }
+                }
 
-                        loc += 1;
-                        match tokens.get(loc) {
-                            None => {
-                                changed |=
-                                    self.first.get_mut(&target).unwrap().insert(ExTerm::Empty);
-                                break;
-                            }
-                            Some(Token::NonTerm(new_id)) => {
-                                id = new_id;
-                            }
-                            Some(Token::Eof) => {
-                                changed |= self.first.get_mut(&target).unwrap().insert(ExTerm::Eof);
-                                break;
-                            }
-                            Some(Token::Term(k)) => {
-                                changed |= self
-                                    .first
-                                    .get_mut(&target)
-                                    .unwrap()
-                                    .insert(ExTerm::Term(k.clone()));
-                                break;
-                            }
-                        }
-                    }
+                if changed && in_queue.insert(*other) {
+                    queue.push_back(*other);
                 }
             }
         }
-
-        if changed {
-            self.calculate_first_non_terminals()
-        }
     }
+
+    // pub fn calculate_first_non_terminals(&mut self) {
+    //     let mut changed = false;
+
+    //     //we need all these entries there already
+    //     // for id in self.rules.keys() {
+    //     //     self.first.entry(*id).or_default();
+    //     // }
+
+    //     for (target, tokens) in iterate_rules(&self.rules) {
+    //         //skip terminals since they were done already
+    //         let Some(Token::NonTerm(id)) = tokens.first() else {
+    //             continue;
+    //         };
+
+    //         //loop empty A style rules untill we get term A style
+    //         let mut id = id;
+    //         let mut loc = 0;
+    //         loop {
+    //             match self.first[id].contains(&ExTerm::Empty) {
+    //                 false => {
+    //                     if *id == target {
+    //                         break;
+    //                     }
+
+    //                     //Safety:we just checked id!=target
+    //                     let [Some(other), Some(me)] =
+    //                         (unsafe { self.first.get_many_unchecked_mut([id, &target]) })
+    //                     else {
+    //                         break;
+    //                     };
+
+    //                     for item in other.iter().cloned() {
+    //                         changed |= me.insert(item);
+    //                     }
+
+    //                     break;
+    //                 }
+    //                 true => {
+    //                     if *id != target {
+    //                         //Safety:we just checked id!=target
+    //                         if let [Some(other), Some(me)] =
+    //                             unsafe { self.first.get_many_unchecked_mut([id, &target]) }
+    //                         {
+    //                             for item in other.iter().cloned() {
+    //                                 if item != ExTerm::Empty {
+    //                                     changed |= me.insert(item);
+    //                                 }
+    //                             }
+    //                         };
+    //                     }
+
+    //                     loc += 1;
+    //                     match tokens.get(loc) {
+    //                         None => {
+    //                             changed |=
+    //                                 self.first.get_mut(&target).unwrap().insert(ExTerm::Empty);
+    //                             break;
+    //                         }
+    //                         Some(Token::NonTerm(new_id)) => {
+    //                             id = new_id;
+    //                         }
+    //                         Some(Token::Eof) => {
+    //                             changed |= self.first.get_mut(&target).unwrap().insert(ExTerm::Eof);
+    //                             break;
+    //                         }
+    //                         Some(Token::Term(k)) => {
+    //                             changed |= self
+    //                                 .first
+    //                                 .get_mut(&target)
+    //                                 .unwrap()
+    //                                 .insert(ExTerm::Term(k.clone()));
+    //                             break;
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+
+    //     if changed {
+    //         self.calculate_first_non_terminals()
+    //     }
+    // }
 
     ///makes sure the [`LLGrammar::follow`] set is valid
     ///**Dependencies:** depends on a valid [`LLGrammar::first`]
@@ -756,8 +858,8 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
 
 #[cfg(test)]
 mod tests {
+    use super::{ExTerm, LLGrammar, NonTermId, TokList, Token};
     use crate::check::PeekInfo;
-use super::{ExTerm, LLGrammar, NonTermId, TokList, Token};
     use alloc::rc::Rc;
     use hashbrown::HashSet;
 
@@ -786,9 +888,9 @@ use super::{ExTerm, LLGrammar, NonTermId, TokList, Token};
     fn macro_safety_edge_cases() {
         // Grammar 0: S → 'a'
         let mut g0: PeekInfo = PeekInfo::default();
-        g0.add_rule( 0, &[Token::Term('a')]);
+        g0.add_rule(0, &[Token::Term('a')]);
         assert!(
-            g0.is_valid_macro( &[Token::Term('a')]),
+            g0.is_valid_macro(&[Token::Term('a')]),
             "terminal tail should be macro‑safe"
         );
 
@@ -847,98 +949,110 @@ use super::{ExTerm, LLGrammar, NonTermId, TokList, Token};
     /// Terminals (as chars):
     ///  '{' '}' '[' ']' ',' ':' 's' (string) 'n' (number)
     #[test]
-fn macro_safety_json_like() {
-    let mut peek = PeekInfo::default();
+    fn macro_safety_json_like() {
+        let mut peek = PeekInfo::default();
 
-    // VALUE → OBJECT | ARRAY | 's' | 'n'
-    peek.add_rule(0, &[Token::<char>::NonTerm(1)]);
-    peek.add_rule(0, &[Token::<char>::NonTerm(6)]);
-    peek.add_rule(0, &[Token::Term('s')]);
-    peek.add_rule(0, &[Token::Term('n')]);
+        // VALUE → OBJECT | ARRAY | 's' | 'n'
+        peek.add_rule(0, &[Token::<char>::NonTerm(1)]);
+        peek.add_rule(0, &[Token::<char>::NonTerm(6)]);
+        peek.add_rule(0, &[Token::Term('s')]);
+        peek.add_rule(0, &[Token::Term('n')]);
 
-    // OBJECT → '{' OPTMEMBERS '}'
-    peek.add_rule(
-        1,
-        &[Token::Term('{'), Token::NonTerm(2), Token::Term('}')],
-    );
+        // OBJECT → '{' OPTMEMBERS '}'
+        peek.add_rule(1, &[Token::Term('{'), Token::NonTerm(2), Token::Term('}')]);
 
-    // OPTMEMBERS → MEMBERS | ε
-    peek.add_rule(2, &[Token::<char>::NonTerm(3)]);
-    peek.add_rule::<u32>(2, &[]);
+        // OPTMEMBERS → MEMBERS | ε
+        peek.add_rule(2, &[Token::<char>::NonTerm(3)]);
+        peek.add_rule::<u32>(2, &[]);
 
-    // MEMBERS → PAIR RESTMEMBERS
-    peek.add_rule(3, &[Token::<char>::NonTerm(5), Token::<char>::NonTerm(4)]);
+        // MEMBERS → PAIR RESTMEMBERS
+        peek.add_rule(3, &[Token::<char>::NonTerm(5), Token::<char>::NonTerm(4)]);
 
-    // RESTMEMBERS → ',' PAIR RESTMEMBERS | ε
-    peek.add_rule(
-        4,
-        &[Token::Term(','), Token::<char>::NonTerm(5), Token::<char>::NonTerm(4)],
-    );
-    peek.add_rule::<i8>(4, &[]);
+        // RESTMEMBERS → ',' PAIR RESTMEMBERS | ε
+        peek.add_rule(
+            4,
+            &[
+                Token::Term(','),
+                Token::<char>::NonTerm(5),
+                Token::<char>::NonTerm(4),
+            ],
+        );
+        peek.add_rule::<i8>(4, &[]);
 
-    // PAIR → 's' ':' VALUE
-    peek.add_rule(
-        5,
-        &[Token::Term('s'), Token::Term(':'), Token::<char>::NonTerm(0)],
-    );
+        // PAIR → 's' ':' VALUE
+        peek.add_rule(
+            5,
+            &[
+                Token::Term('s'),
+                Token::Term(':'),
+                Token::<char>::NonTerm(0),
+            ],
+        );
 
-    // ARRAY → '[' OPTVALUES ']'
-    peek.add_rule(
-        6,
-        &[Token::Term('['), Token::<char>::NonTerm(7), Token::Term(']')],
-    );
+        // ARRAY → '[' OPTVALUES ']'
+        peek.add_rule(
+            6,
+            &[
+                Token::Term('['),
+                Token::<char>::NonTerm(7),
+                Token::Term(']'),
+            ],
+        );
 
-    // OPTVALUES → VALUES | ε
-    peek.add_rule(7, &[Token::<char>::NonTerm(8)]);
-    peek.add_rule::<char>(7, &[]);
+        // OPTVALUES → VALUES | ε
+        peek.add_rule(7, &[Token::<char>::NonTerm(8)]);
+        peek.add_rule::<char>(7, &[]);
 
-    // VALUES → VALUE RESTVALUES
-    peek.add_rule(8, &[Token::<char>::NonTerm(0), Token::<char>::NonTerm(9)]);
+        // VALUES → VALUE RESTVALUES
+        peek.add_rule(8, &[Token::<char>::NonTerm(0), Token::<char>::NonTerm(9)]);
 
-    // RESTVALUES → ',' VALUE RESTVALUES | ε
-    peek.add_rule(
-        9,
-        &[Token::Term(','), Token::<char>::NonTerm(0), Token::<char>::NonTerm(9)],
-    );
-    peek.add_rule::<char>(9, &[]);
+        // RESTVALUES → ',' VALUE RESTVALUES | ε
+        peek.add_rule(
+            9,
+            &[
+                Token::Term(','),
+                Token::<char>::NonTerm(0),
+                Token::<char>::NonTerm(9),
+            ],
+        );
+        peek.add_rule::<char>(9, &[]);
 
-    // ------------------------------------------------------------------
-    // EXPECTED MACRO‑SAFETY RESULTS
-    // ------------------------------------------------------------------
+        // ------------------------------------------------------------------
+        // EXPECTED MACRO‑SAFETY RESULTS
+        // ------------------------------------------------------------------
 
-    // SAFE productions (pass the actual token arrays directly)
-    assert!(peek.is_valid_macro(&[
-        Token::Term('{'),
-        Token::<char>::NonTerm(2),
-        Token::Term('}')
-    ])); // OBJECT → … '}'
+        // SAFE productions (pass the actual token arrays directly)
+        assert!(peek.is_valid_macro(&[
+            Token::Term('{'),
+            Token::<char>::NonTerm(2),
+            Token::Term('}')
+        ])); // OBJECT → … '}'
 
-    assert!(peek.is_valid_macro(&[
-        Token::Term('['),
-        Token::<char>::NonTerm(7),
-        Token::Term(']')
-    ])); // ARRAY  → … ']'
+        assert!(peek.is_valid_macro(&[
+            Token::Term('['),
+            Token::<char>::NonTerm(7),
+            Token::Term(']')
+        ])); // ARRAY  → … ']'
 
-    assert!(peek.is_valid_macro(&[
-        Token::Term('s'),
-        Token::Term(':'),
-        Token::<char>::NonTerm(0)
-    ])); // PAIR   → … VALUE
+        assert!(peek.is_valid_macro(&[
+            Token::Term('s'),
+            Token::Term(':'),
+            Token::<char>::NonTerm(0)
+        ])); // PAIR   → … VALUE
 
-    // VALUE alternatives ending in terminals are SAFE
-    assert!(peek.is_valid_macro(&[Token::Term('s')])); // VALUE → 's'
-    assert!(peek.is_valid_macro(&[Token::Term('n')])); // VALUE → 'n'
+        // VALUE alternatives ending in terminals are SAFE
+        assert!(peek.is_valid_macro(&[Token::Term('s')])); // VALUE → 's'
+        assert!(peek.is_valid_macro(&[Token::Term('n')])); // VALUE → 'n'
 
-    // UNSAFE: tails are nullable chains
-    assert!(!peek.is_valid_macro(&[Token::<char>::NonTerm(3)])); // OPTMEMBERS → MEMBERS
-    assert!(!peek.is_valid_macro(&[
-        Token::Term(','),
-        Token::<char>::NonTerm(5),
-        Token::<char>::NonTerm(4)
-    ])); // RESTMEMBERS recursive
-    assert!(!peek.is_valid_macro::<char>(&[])); // RESTMEMBERS → ε
-}
-
+        // UNSAFE: tails are nullable chains
+        assert!(!peek.is_valid_macro(&[Token::<char>::NonTerm(3)])); // OPTMEMBERS → MEMBERS
+        assert!(!peek.is_valid_macro(&[
+            Token::Term(','),
+            Token::<char>::NonTerm(5),
+            Token::<char>::NonTerm(4)
+        ])); // RESTMEMBERS recursive
+        assert!(!peek.is_valid_macro::<char>(&[])); // RESTMEMBERS → ε
+    }
 
     // --------------------------------------------------------------------------
 

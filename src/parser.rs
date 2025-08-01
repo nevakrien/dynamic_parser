@@ -1,7 +1,7 @@
-use crate::check::PeekInfo;
 use crate::check::ExTerm;
 use crate::check::GrammerErrors;
 use crate::check::LLGrammar;
+use crate::check::PeekInfo;
 use crate::check::ProdTable;
 use crate::check::Token as CToken;
 use alloc::rc::Rc;
@@ -316,7 +316,7 @@ where
 
     pub fn add_rule(&mut self, id: NonTermId, prod: Prod<Term, State, F1, F2>) {
         let toks = prod.into_grammar();
-        self.peeks.add_rule(id,&*toks);
+        self.peeks.add_rule(id, &*toks);
         self.grammar.add_rule(id, toks);
         self.rules.entry(id).or_default().push(prod);
     }
