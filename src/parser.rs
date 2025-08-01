@@ -1,3 +1,4 @@
+use crate::check::PeekInfo;
 use crate::check::ExTerm;
 use crate::check::GrammerErrors;
 use crate::check::LLGrammar;
@@ -279,6 +280,9 @@ where
     ///type checking info generated automatically
     pub grammar: LLGrammar<Term::Key>,
 
+    ///macro specific info
+    pub peeks: PeekInfo,
+
     ///dynamic parser generated automatically
     pub parser: Parser<Term, State, F1, F2>,
 }
@@ -291,6 +295,9 @@ where
 {
     pub fn new(start: NonTermId, rules_v: Vec<(NonTermId, Prod<Term, State, F1, F2>)>) -> Self {
         let grammar = LLGrammar::from_rules(rules_v.iter().map(|(id, p)| (*id, p.into_grammar())));
+        let mut peeks = PeekInfo::default();
+        grammar.update_peek(&mut peeks);
+
         let mut rules: hashbrown::HashMap<_, Vec<_>> = HashMap::new();
         for (id, p) in rules_v.into_iter() {
             rules.entry(id).or_default().push(p)
@@ -302,17 +309,20 @@ where
             start,
             rules,
             grammar,
+            peeks,
             parser,
         }
     }
 
     pub fn add_rule(&mut self, id: NonTermId, prod: Prod<Term, State, F1, F2>) {
-        self.grammar.add_rule(id, prod.into_grammar());
+        let toks = prod.into_grammar();
+        self.peeks.add_rule(id,&*toks);
+        self.grammar.add_rule(id, toks);
         self.rules.entry(id).or_default().push(prod);
     }
 
     pub fn is_valid_macro(&mut self, non_term: NonTermId, prod: usize) -> bool {
-        self.grammar
+        self.peeks
             .is_valid_macro(&self.rules[&non_term][prod].into_grammar())
     }
 

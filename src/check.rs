@@ -131,43 +131,43 @@ pub fn iterate_rules<K>(
     rules.iter().flat_map(|(k, v)| v.iter().map(|x| (*k, x)))
 }
 
-fn calculate_peeks<K>(
-    toks: &[Token<K>],
-    rules: &HashMap<NonTermId, Vec<TokList<K>>>,
-    peeks: &mut HashMap<NonTermId, bool>,
-    visited: &mut HashSet<NonTermId>,
-) -> bool {
-    let Some(t) = toks.last() else {
-        return true;
-    };
+// fn calculate_peeks<K>(
+//     toks: &[Token<K>],
+//     rules: &HashMap<NonTermId, Vec<TokList<K>>>,
+//     peeks: &mut HashMap<NonTermId, bool>,
+//     visited: &mut HashSet<NonTermId>,
+// ) -> bool {
+//     let Some(t) = toks.last() else {
+//         return true;
+//     };
 
-    let id = match t {
-        Token::Eof => return true,
-        Token::Term(_) => return false,
-        Token::NonTerm(id) => id,
-    };
+//     let id = match t {
+//         Token::Eof => return true,
+//         Token::Term(_) => return false,
+//         Token::NonTerm(id) => id,
+//     };
 
-    if !visited.insert(*id) {
-        //be optimistic to avoid cycles
-        //however for the outer call this is valid
-        return false;
-    }
+//     if !visited.insert(*id) {
+//         //be optimistic to avoid cycles
+//         //however for the outer call this is valid
+//         return false;
+//     }
 
-    if let Some(ans) = peeks.get(id) {
-        return *ans;
-    }
+//     if let Some(ans) = peeks.get(id) {
+//         return *ans;
+//     }
 
-    for toks in rules[id].iter() {
-        if calculate_peeks(toks, rules, peeks, visited) {
-            peeks.insert(*id, true);
-            return true;
-        }
-    }
+//     for toks in rules[id].iter() {
+//         if calculate_peeks(toks, rules, peeks, visited) {
+//             peeks.insert(*id, true);
+//             return true;
+//         }
+//     }
 
-    //we cant update since we have false negatives
-    //final result should be good though
-    false
-}
+//     //we cant update since we have false negatives
+//     //final result should be good though
+//     false
+// }
 
 /// Retrieves (or computes and memoises) the **FIRST** set of a *slice* of
 /// tokens.
@@ -325,6 +325,56 @@ pub struct GrammerErrors<K> {
     pub first_follow: Vec<(NonTermId, HashSet<ExTerm<K>>)>,
 }
 
+#[derive(Debug, Clone,PartialEq, Default)]
+pub struct PeekInfo {
+    pub peek_update: HashMap<NonTermId, HashSet<NonTermId>>,
+    /// whether or not a non terminal peek the next input
+    pub peeks: HashSet<NonTermId>,
+}
+
+impl PeekInfo {
+    pub fn is_valid_macro<K>(&self,toks: &[Token<K>])->bool {
+        match toks.last(){
+            None|Some(Token::Eof)=>false,
+            Some(Token::NonTerm(id))=>!self.peeks.contains(id),
+            _=>true,
+        }
+    }
+    pub fn add_rule<K>(&mut self,id:NonTermId,toks:&[Token<K>]){
+        self.add_rules(core::iter::once((id,toks)))
+    }
+    pub fn add_rules<'a, K: 'a>(&mut self,rules:impl Iterator<Item=(NonTermId,&'a [Token<K>])>){
+        let mut ids =  VecDeque::new();
+        for (id,toks) in rules {
+            if self.add_rule_static(id,toks){
+                ids.push_back(id);
+            }
+        }
+        self.update_loop(ids)
+    }
+    fn add_rule_static<K>(&mut self, target: NonTermId, toks: &[Token<K>]) -> bool {
+        match toks.last() {
+            None|Some(Token::Eof) => self.peeks.insert(target),
+            Some(Token::NonTerm(id)) => if self.peek_update.entry(target).or_default().insert(*id) {
+                self.peeks.contains(id)
+            }else {false},
+            _ => false,
+        }
+    }
+
+    fn update_loop(&mut self,mut ids:VecDeque<NonTermId>){
+        while let Some(id) = ids.pop_front(){
+            if self.peeks.contains(&id) {
+                for other in self.peek_update.entry(id).or_default().iter(){
+                    if self.peeks.insert(*other) {
+                        ids.push_back(*other);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// holds the rules of a grammer and some metadata
 /// the metadata is only valid after a call to the correct methods is issued
 #[derive(Debug, Clone, PartialEq)]
@@ -335,7 +385,7 @@ pub struct LLGrammar<K: Eq + Hash + Clone> {
     /// FIRST(A)  (includes `Empty` iff A is nullable)
     pub first: HashMap<NonTermId, HashSet<ExTerm<K>>>,
 
-        /// First(w) for sequnces
+    /// First(w) for sequnces
     pub first_seq: HashMap<TokList<K>, HashSet<ExTerm<K>>>,
 
     /// FOLLOW(A) (may contain `ExTerm::Eof`)
@@ -343,8 +393,8 @@ pub struct LLGrammar<K: Eq + Hash + Clone> {
 
     pub follow_update: HashMap<NonTermId, HashSet<NonTermId>>,
 
-    /// whether or not a non terminal peek the next input
-    pub peeks: HashMap<NonTermId, bool>,
+    // whether or not a non terminal peek the next input
+    // pub peeks: HashMap<NonTermId, bool>,
 }
 
 impl<K: Eq + Hash + Clone> Default for LLGrammar<K> {
@@ -354,7 +404,7 @@ impl<K: Eq + Hash + Clone> Default for LLGrammar<K> {
             first_seq: HashMap::new(),
             follow: HashMap::new(),
             follow_update: HashMap::new(),
-            peeks: HashMap::new(),
+            // peeks: HashMap::new(),
             rules: HashMap::new(),
         }
     }
@@ -383,7 +433,11 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
         self.first_seq.clear();
         self.follow.values_mut().for_each(HashSet::clear);
         self.follow_update.values_mut().for_each(HashSet::clear);
-        self.peeks.clear();
+        // self.peeks.clear();
+    }
+
+    pub fn update_peek(&self,p:&mut PeekInfo){
+        p.add_rules(iterate_rules(&self.rules).map(|(i,r)| (i,&**r)));
     }
 
     /// Inserts **$** into FOLLOW(`id`).  Must be invoked **once** on the start
@@ -396,35 +450,35 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
         self.rules.entry(lhs).or_default().push(rhs);
     }
 
-    /// Checks if a rule is valid to be used as a macro (ie changing the input)
-    /// **Dependencies:** caches results to peeks
-    pub fn is_valid_macro(&mut self, toks: &[Token<K>]) -> bool {
-        let Some(t) = toks.last() else {
-            return false;
-        };
+    // /// Checks if a rule is valid to be used as a macro (ie changing the input)
+    // /// **Dependencies:** caches results to peeks that cache may be invalidated by additions so runing
+    // pub fn is_valid_macro(&mut self, toks: &[Token<K>]) -> bool {
+    //     let Some(t) = toks.last() else {
+    //         return false;
+    //     };
 
-        let id = match t {
-            Token::Eof => return false,
-            Token::Term(_) => return true,
-            Token::NonTerm(id) => id,
-        };
+    //     let id = match t {
+    //         Token::Eof => return false,
+    //         Token::Term(_) => return true,
+    //         Token::NonTerm(id) => id,
+    //     };
 
-        if let Some(ans) = self.peeks.get(id) {
-            return !*ans;
-        }
+    //     if let Some(ans) = self.peeks.get(id) {
+    //         return !*ans;
+    //     }
 
-        let mut visited = HashSet::new();
-        let ans = !calculate_peeks(toks, &self.rules, &mut self.peeks, &mut visited);
-        if ans {
-            //now we have checked all last extended terminals are not empty
-            //this means that all visited non terminals are also non empty
-            for id in visited {
-                self.peeks.insert(id, false);
-            }
-        }
+    //     let mut visited = HashSet::new();
+    //     let ans = !calculate_peeks(toks, &self.rules, &mut self.peeks, &mut visited);
+    //     if ans {
+    //         //now we have checked all last extended terminals are not empty
+    //         //this means that all visited non terminals are also non empty
+    //         for id in visited {
+    //             self.peeks.insert(id, false);
+    //         }
+    //     }
 
-        ans
-    }
+    //     ans
+    // }
 
     /// Gets the first set of a slice
     /// **Dependencies:** depends on a valid [`LLGrammar::first`]
@@ -529,7 +583,7 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
         //     self.first.entry(*id).or_default();
         // }
 
-        for (target, tokens) in iterate_rules(&self.rules) {
+        for (target, tokens) in iterate_rules::<K>(&self.rules) {
             //skip terminals since they were done already
             let Some(Token::NonTerm(id)) = tokens.first() else {
                 continue;
@@ -702,7 +756,8 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExTerm, LLGrammar, NonTermId, TokList, Token};
+    use crate::check::PeekInfo;
+use super::{ExTerm, LLGrammar, NonTermId, TokList, Token};
     use alloc::rc::Rc;
     use hashbrown::HashSet;
 
@@ -730,51 +785,51 @@ mod tests {
     #[test]
     fn macro_safety_edge_cases() {
         // Grammar 0: S → 'a'
-        let mut g0: LLGrammar<char> = LLGrammar::new();
-        add_rule(&mut g0, 0, &[Token::Term('a')]);
+        let mut g0: PeekInfo = PeekInfo::default();
+        g0.add_rule( 0, &[Token::Term('a')]);
         assert!(
-            g0.is_valid_macro(&g0.rules[&0][0].clone()),
+            g0.is_valid_macro( &[Token::Term('a')]),
             "terminal tail should be macro‑safe"
         );
 
         // Grammar 1: S → A; A → ε | 'a'
-        let mut g1: LLGrammar<char> = LLGrammar::new();
-        add_rule(&mut g1, 0, &[Token::NonTerm(1)]); // S → A
-        add_rule(&mut g1, 1, &[]); // A → ε
-        add_rule(&mut g1, 1, &[Token::Term('a')]); // A → 'a'
+        let mut g1: PeekInfo = PeekInfo::default();
+        g1.add_rule(0, &[Token::<char>::NonTerm(1)]); // S → A
+        g1.add_rule::<char>(1, &[]); // A → ε
+        g1.add_rule(1, &[Token::Term('a')]); // A → 'a'
         assert!(
-            !g1.is_valid_macro(&g1.rules[&0][0].clone()),
+            !g1.is_valid_macro(&[Token::<char>::NonTerm(1)]),
             "nullable tail must be rejected for macro safety"
         );
 
         // Grammar 2: A → 'a' A | 'a'  (right recursion)
-        let mut g2: LLGrammar<char> = LLGrammar::new();
-        add_rule(&mut g2, 0, &[Token::Term('a'), Token::NonTerm(0)]);
-        add_rule(&mut g2, 0, &[Token::Term('a')]);
+        let mut g2: PeekInfo = PeekInfo::default();
+        g2.add_rule(0, &[Token::Term('a'), Token::NonTerm(0)]);
+        g2.add_rule(0, &[Token::Term('a')]);
         assert!(
-            g2.is_valid_macro(&g2.rules[&0][0].clone()),
+            g2.is_valid_macro(&[Token::Term('a'), Token::NonTerm(0)]),
             "recursive production should be macro‑safe"
         );
         assert!(
-            g2.is_valid_macro(&g2.rules[&0][1].clone()),
+            g2.is_valid_macro(&[Token::Term('a'), Token::NonTerm(0)]),
             "base production should be macro‑safe"
         );
 
         // Grammar 3: A → B; B → C; C → 'c'  (multi-hop chain)
-        let mut g3: LLGrammar<char> = LLGrammar::new();
-        add_rule(&mut g3, 0, &[Token::NonTerm(1)]); // A → B
-        add_rule(&mut g3, 1, &[Token::NonTerm(2)]); // B → C
-        add_rule(&mut g3, 2, &[Token::Term('c')]); // C → 'c'
+        let mut g3: PeekInfo = PeekInfo::default();
+        g3.add_rule(0, &[Token::<char>::NonTerm(1)]); // A → B
+        g3.add_rule(1, &[Token::<char>::NonTerm(2)]); // B → C
+        g3.add_rule(2, &[Token::Term('c')]); // C → 'c'
         assert!(
-            g3.is_valid_macro(&g3.rules[&0][0].clone()),
+            g3.is_valid_macro(&[Token::<char>::NonTerm(1)]),
             "A’s production should be macro‑safe via B→C→'c'"
         );
         assert!(
-            g3.is_valid_macro(&g3.rules[&1][0].clone()),
+            g3.is_valid_macro(&[Token::<char>::NonTerm(2)]),
             "B’s production should be macro‑safe via C→'c'"
         );
         assert!(
-            g3.is_valid_macro(&g3.rules[&2][0].clone()),
+            g3.is_valid_macro(&[Token::Term('c')]),
             "C’s production is trivially macro‑safe"
         );
     }
@@ -792,84 +847,98 @@ mod tests {
     /// Terminals (as chars):
     ///  '{' '}' '[' ']' ',' ':' 's' (string) 'n' (number)
     #[test]
-    fn macro_safety_json_like() {
-        let mut g: LLGrammar<char> = LLGrammar::new();
+fn macro_safety_json_like() {
+    let mut peek = PeekInfo::default();
 
-        // VALUE → OBJECT | ARRAY | 's' | 'n'
-        add_rule(&mut g, 0, &[Token::NonTerm(1)]);
-        add_rule(&mut g, 0, &[Token::NonTerm(6)]);
-        add_rule(&mut g, 0, &[Token::Term('s')]);
-        add_rule(&mut g, 0, &[Token::Term('n')]);
+    // VALUE → OBJECT | ARRAY | 's' | 'n'
+    peek.add_rule(0, &[Token::<char>::NonTerm(1)]);
+    peek.add_rule(0, &[Token::<char>::NonTerm(6)]);
+    peek.add_rule(0, &[Token::Term('s')]);
+    peek.add_rule(0, &[Token::Term('n')]);
 
-        // OBJECT → '{' OPTMEMBERS '}'
-        add_rule(
-            &mut g,
-            1,
-            &[Token::Term('{'), Token::NonTerm(2), Token::Term('}')],
-        );
+    // OBJECT → '{' OPTMEMBERS '}'
+    peek.add_rule(
+        1,
+        &[Token::Term('{'), Token::NonTerm(2), Token::Term('}')],
+    );
 
-        // OPTMEMBERS → MEMBERS | ε
-        add_rule(&mut g, 2, &[Token::NonTerm(3)]);
-        add_rule(&mut g, 2, &[]);
+    // OPTMEMBERS → MEMBERS | ε
+    peek.add_rule(2, &[Token::<char>::NonTerm(3)]);
+    peek.add_rule::<u32>(2, &[]);
 
-        // MEMBERS → PAIR RESTMEMBERS
-        add_rule(&mut g, 3, &[Token::NonTerm(5), Token::NonTerm(4)]);
+    // MEMBERS → PAIR RESTMEMBERS
+    peek.add_rule(3, &[Token::<char>::NonTerm(5), Token::<char>::NonTerm(4)]);
 
-        // RESTMEMBERS → ',' PAIR RESTMEMBERS | ε
-        add_rule(
-            &mut g,
-            4,
-            &[Token::Term(','), Token::NonTerm(5), Token::NonTerm(4)],
-        );
-        add_rule(&mut g, 4, &[]);
+    // RESTMEMBERS → ',' PAIR RESTMEMBERS | ε
+    peek.add_rule(
+        4,
+        &[Token::Term(','), Token::<char>::NonTerm(5), Token::<char>::NonTerm(4)],
+    );
+    peek.add_rule::<i8>(4, &[]);
 
-        // PAIR → 's' ':' VALUE
-        add_rule(
-            &mut g,
-            5,
-            &[Token::Term('s'), Token::Term(':'), Token::NonTerm(0)],
-        );
+    // PAIR → 's' ':' VALUE
+    peek.add_rule(
+        5,
+        &[Token::Term('s'), Token::Term(':'), Token::<char>::NonTerm(0)],
+    );
 
-        // ARRAY → '[' OPTVALUES ']'
-        add_rule(
-            &mut g,
-            6,
-            &[Token::Term('['), Token::NonTerm(7), Token::Term(']')],
-        );
+    // ARRAY → '[' OPTVALUES ']'
+    peek.add_rule(
+        6,
+        &[Token::Term('['), Token::<char>::NonTerm(7), Token::Term(']')],
+    );
 
-        // OPTVALUES → VALUES | ε
-        add_rule(&mut g, 7, &[Token::NonTerm(8)]);
-        add_rule(&mut g, 7, &[]);
+    // OPTVALUES → VALUES | ε
+    peek.add_rule(7, &[Token::<char>::NonTerm(8)]);
+    peek.add_rule::<char>(7, &[]);
 
-        // VALUES → VALUE RESTVALUES
-        add_rule(&mut g, 8, &[Token::NonTerm(0), Token::NonTerm(9)]);
+    // VALUES → VALUE RESTVALUES
+    peek.add_rule(8, &[Token::<char>::NonTerm(0), Token::<char>::NonTerm(9)]);
 
-        // RESTVALUES → ',' VALUE RESTVALUES | ε
-        add_rule(
-            &mut g,
-            9,
-            &[Token::Term(','), Token::NonTerm(0), Token::NonTerm(9)],
-        );
-        add_rule(&mut g, 9, &[]);
+    // RESTVALUES → ',' VALUE RESTVALUES | ε
+    peek.add_rule(
+        9,
+        &[Token::Term(','), Token::<char>::NonTerm(0), Token::<char>::NonTerm(9)],
+    );
+    peek.add_rule::<char>(9, &[]);
 
-        // ------------------------------------------------------------------
-        // EXPECTED MACRO‑SAFETY RESULTS
-        // ------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // EXPECTED MACRO‑SAFETY RESULTS
+    // ------------------------------------------------------------------
 
-        // Definitively SAFE productions
-        assert!(g.is_valid_macro(&g.rules[&1][0].clone())); // OBJECT → … '}'      (tail is '}')
-        assert!(g.is_valid_macro(&g.rules[&6][0].clone())); // ARRAY  → … ']'      (tail is ']')
-        assert!(g.is_valid_macro(&g.rules[&5][0].clone())); // PAIR   → … VALUE    (VALUE always consumes)
+    // SAFE productions (pass the actual token arrays directly)
+    assert!(peek.is_valid_macro(&[
+        Token::Term('{'),
+        Token::<char>::NonTerm(2),
+        Token::Term('}')
+    ])); // OBJECT → … '}'
 
-        // VALUE alternatives ending in terminals are SAFE
-        assert!(g.is_valid_macro(&g.rules[&0][2].clone())); // VALUE → 's'
-        assert!(g.is_valid_macro(&g.rules[&0][3].clone())); // VALUE → 'n'
+    assert!(peek.is_valid_macro(&[
+        Token::Term('['),
+        Token::<char>::NonTerm(7),
+        Token::Term(']')
+    ])); // ARRAY  → … ']'
 
-        // UNSAFE: tails are nullable chains
-        assert!(!g.is_valid_macro(&g.rules[&2][0].clone())); // OPTMEMBERS → MEMBERS  (MEMBERS tail may ε)
-        assert!(!g.is_valid_macro(&g.rules[&4][0].clone())); // RESTMEMBERS recursive alternative
-        assert!(!g.is_valid_macro(&g.rules[&4][1].clone())); // RESTMEMBERS → ε
-    }
+    assert!(peek.is_valid_macro(&[
+        Token::Term('s'),
+        Token::Term(':'),
+        Token::<char>::NonTerm(0)
+    ])); // PAIR   → … VALUE
+
+    // VALUE alternatives ending in terminals are SAFE
+    assert!(peek.is_valid_macro(&[Token::Term('s')])); // VALUE → 's'
+    assert!(peek.is_valid_macro(&[Token::Term('n')])); // VALUE → 'n'
+
+    // UNSAFE: tails are nullable chains
+    assert!(!peek.is_valid_macro(&[Token::<char>::NonTerm(3)])); // OPTMEMBERS → MEMBERS
+    assert!(!peek.is_valid_macro(&[
+        Token::Term(','),
+        Token::<char>::NonTerm(5),
+        Token::<char>::NonTerm(4)
+    ])); // RESTMEMBERS recursive
+    assert!(!peek.is_valid_macro::<char>(&[])); // RESTMEMBERS → ε
+}
+
 
     // --------------------------------------------------------------------------
 
