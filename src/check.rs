@@ -131,44 +131,6 @@ pub fn iterate_rules<K>(
     rules.iter().flat_map(|(k, v)| v.iter().map(|x| (*k, x)))
 }
 
-// fn calculate_peeks<K>(
-//     toks: &[Token<K>],
-//     rules: &HashMap<NonTermId, Vec<TokList<K>>>,
-//     peeks: &mut HashMap<NonTermId, bool>,
-//     visited: &mut HashSet<NonTermId>,
-// ) -> bool {
-//     let Some(t) = toks.last() else {
-//         return true;
-//     };
-
-//     let id = match t {
-//         Token::Eof => return true,
-//         Token::Term(_) => return false,
-//         Token::NonTerm(id) => id,
-//     };
-
-//     if !visited.insert(*id) {
-//         //be optimistic to avoid cycles
-//         //however for the outer call this is valid
-//         return false;
-//     }
-
-//     if let Some(ans) = peeks.get(id) {
-//         return *ans;
-//     }
-
-//     for toks in rules[id].iter() {
-//         if calculate_peeks(toks, rules, peeks, visited) {
-//             peeks.insert(*id, true);
-//             return true;
-//         }
-//     }
-
-//     //we cant update since we have false negatives
-//     //final result should be good though
-//     false
-// }
-
 /// Retrieves (or computes and memoises) the **FIRST** set of a *slice* of
 /// tokens.
 ///
@@ -392,8 +354,10 @@ pub struct LLGrammar<K: Eq + Hash + Clone> {
     /// FIRST(A)  (includes `Empty` iff A is nullable)
     pub first: HashMap<NonTermId, HashSet<ExTerm<K>>>,
 
+    /// FIRST(A) ⊇ FIRST(B)
     pub first_update: HashMap<NonTermId, HashSet<NonTermId>>,
 
+    /// when A turns null which rules now have a new update
     pub null_pending: HashMap<NonTermId, Vec<(NonTermId, ProdId, usize)>>,
 
     /// First(w) for sequnces
@@ -402,6 +366,7 @@ pub struct LLGrammar<K: Eq + Hash + Clone> {
     /// FOLLOW(A) (may contain `ExTerm::Eof`)
     pub follow: HashMap<NonTermId, HashSet<ExTerm<K>>>,
 
+    /// FOLLOW(A) ⊇ FOLLOW(B)
     pub follow_update: HashMap<NonTermId, HashSet<NonTermId>>,
     // whether or not a non terminal peek the next input
     // pub peeks: HashMap<NonTermId, bool>,
@@ -451,6 +416,7 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
         // self.peeks.clear();
     }
 
+    /// updates peek using the exissting rules
     pub fn update_peek(&self, p: &mut PeekInfo) {
         p.add_rules(iterate_rules(&self.rules).map(|(i, r)| (i, &**r)));
     }
@@ -461,39 +427,20 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
         self.follow.entry(id).or_default().insert(ExTerm::Eof);
     }
 
-    pub fn add_rule(self: &mut LLGrammar<K>, lhs: NonTermId, rhs: Rc<[Token<K>]>) {
-        self.rules.entry(lhs).or_default().push(rhs);
+    /// saves rule no update
+    pub fn add_rule(self: &mut LLGrammar<K>, lhs: NonTermId, rhs: Rc<[Token<K>]>){
+        self.rules.entry(lhs).or_default().push(rhs)
     }
 
-    // /// Checks if a rule is valid to be used as a macro (ie changing the input)
-    // /// **Dependencies:** caches results to peeks that cache may be invalidated by additions so runing
-    // pub fn is_valid_macro(&mut self, toks: &[Token<K>]) -> bool {
-    //     let Some(t) = toks.last() else {
-    //         return false;
-    //     };
+    /// saves a rule updates all relvent info
+    pub fn add_rule_update(self: &mut LLGrammar<K>, lhs: NonTermId, rhs: Rc<[Token<K>]>) {
+        let v = self.rules.entry(lhs).or_default();
+        let prod = v.len();
+        v.push(rhs.clone());
 
-    //     let id = match t {
-    //         Token::Eof => return false,
-    //         Token::Term(_) => return true,
-    //         Token::NonTerm(id) => id,
-    //     };
-
-    //     if let Some(ans) = self.peeks.get(id) {
-    //         return !*ans;
-    //     }
-
-    //     let mut visited = HashSet::new();
-    //     let ans = !calculate_peeks(toks, &self.rules, &mut self.peeks, &mut visited);
-    //     if ans {
-    //         //now we have checked all last extended terminals are not empty
-    //         //this means that all visited non terminals are also non empty
-    //         for id in visited {
-    //             self.peeks.insert(id, false);
-    //         }
-    //     }
-
-    //     ans
-    // }
+        self.add_first_of(lhs,prod,&*rhs);
+        self.add_follow_of(lhs,&*rhs)
+    }
 
     /// Gets the first set of a slice
     /// **Dependencies:** depends on a valid [`LLGrammar::first`]
@@ -562,6 +509,13 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
         // self.calculate_first_non_terminals()
     }
 
+    pub fn add_first_of(&mut self,target:NonTermId,prod:ProdId,tokens:&[Token<K>]) {
+        self.first_seq.clear();
+        let v = self.calculate_first_single(target,prod,tokens);
+        self.calculate_first_nulls(v.clone());
+        self.calculate_first_rest(v)
+    }
+
     ///caches all grammer first sets rules into [`LLGrammar::first_seq`]
     pub fn calculate_first_seqs(&mut self) {
         for (_, tokens) in iterate_rules(&self.rules) {
@@ -600,6 +554,34 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
             }
         }
 
+        ans
+    }
+
+    fn calculate_first_single(&mut self,target:NonTermId,prod:ProdId,tokens:&[Token<K>]) -> VecDeque<NonTermId> {
+        let mut ans = VecDeque::new();
+        ans.push_back(target);
+        let set = self.first.entry(target).or_default();
+        
+        match tokens.first() {
+            None => {
+                set.insert(ExTerm::Empty);
+            }
+
+            Some(Token::Term(k)) => {
+                set.insert(ExTerm::Term(k.clone()));
+            }
+            Some(Token::Eof) => {
+                set.insert(ExTerm::Eof);
+            }
+
+            Some(Token::NonTerm(id)) => {
+                self.first_update.entry(*id).or_default().insert(target);
+                self.null_pending
+                    .entry(*id)
+                    .or_default()
+                    .push((target, prod, 0));
+            }
+        }
         ans
     }
 
@@ -677,97 +659,13 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
         }
     }
 
-    // pub fn calculate_first_non_terminals(&mut self) {
-    //     let mut changed = false;
-
-    //     //we need all these entries there already
-    //     // for id in self.rules.keys() {
-    //     //     self.first.entry(*id).or_default();
-    //     // }
-
-    //     for (target, tokens) in iterate_rules(&self.rules) {
-    //         //skip terminals since they were done already
-    //         let Some(Token::NonTerm(id)) = tokens.first() else {
-    //             continue;
-    //         };
-
-    //         //loop empty A style rules untill we get term A style
-    //         let mut id = id;
-    //         let mut loc = 0;
-    //         loop {
-    //             match self.first[id].contains(&ExTerm::Empty) {
-    //                 false => {
-    //                     if *id == target {
-    //                         break;
-    //                     }
-
-    //                     //Safety:we just checked id!=target
-    //                     let [Some(other), Some(me)] =
-    //                         (unsafe { self.first.get_many_unchecked_mut([id, &target]) })
-    //                     else {
-    //                         break;
-    //                     };
-
-    //                     for item in other.iter().cloned() {
-    //                         changed |= me.insert(item);
-    //                     }
-
-    //                     break;
-    //                 }
-    //                 true => {
-    //                     if *id != target {
-    //                         //Safety:we just checked id!=target
-    //                         if let [Some(other), Some(me)] =
-    //                             unsafe { self.first.get_many_unchecked_mut([id, &target]) }
-    //                         {
-    //                             for item in other.iter().cloned() {
-    //                                 if item != ExTerm::Empty {
-    //                                     changed |= me.insert(item);
-    //                                 }
-    //                             }
-    //                         };
-    //                     }
-
-    //                     loc += 1;
-    //                     match tokens.get(loc) {
-    //                         None => {
-    //                             changed |=
-    //                                 self.first.get_mut(&target).unwrap().insert(ExTerm::Empty);
-    //                             break;
-    //                         }
-    //                         Some(Token::NonTerm(new_id)) => {
-    //                             id = new_id;
-    //                         }
-    //                         Some(Token::Eof) => {
-    //                             changed |= self.first.get_mut(&target).unwrap().insert(ExTerm::Eof);
-    //                             break;
-    //                         }
-    //                         Some(Token::Term(k)) => {
-    //                             changed |= self
-    //                                 .first
-    //                                 .get_mut(&target)
-    //                                 .unwrap()
-    //                                 .insert(ExTerm::Term(k.clone()));
-    //                             break;
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
-
-    //     if changed {
-    //         self.calculate_first_non_terminals()
-    //     }
-    // }
-
     ///makes sure the [`LLGrammar::follow`] set is valid
     ///**Dependencies:** depends on a valid [`LLGrammar::first`]
     pub fn calculate_follow(&mut self) {
         self.calculate_follow_pass1();
 
         let queue: VecDeque<NonTermId> = self.follow.keys().copied().collect();
-        self.calculate_follow_for(queue)
+        self.calculate_follow_pass2(queue)
     }
 
     ///add a specific productions follow set
@@ -785,7 +683,7 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
         );
 
         let queue: VecDeque<NonTermId> = core::iter::once(id).collect();
-        self.calculate_follow_for(queue)
+        self.calculate_follow_pass2(queue)
     }
 
     fn calculate_follow_pass1(&mut self) {
@@ -802,29 +700,7 @@ impl<K: Eq + Hash + Clone> LLGrammar<K> {
         }
     }
 
-    // unsafe fn _calculate_follow(&mut self) {
-    //     let mut changed = false;
-
-    //     for (source, dests) in self.follow_update.iter() {
-    //         for d in dests.iter() {
-    //             let [Some(source), Some(dest)] =
-    //                 (unsafe { self.follow.get_many_unchecked_mut([source, d]) })
-    //             else {
-    //                 panic!("fogrgot inilizing")
-    //             };
-    //             for x in source.iter() {
-    //                 changed |= dest.insert(x.clone());
-    //             }
-    //         }
-    //     }
-
-    //     if changed {
-    //         unsafe { self._calculate_follow() }
-    //     }
-    // }
-
-    ///[]
-    fn calculate_follow_for(&mut self, mut queue: VecDeque<NonTermId>) {
+    fn calculate_follow_pass2(&mut self, mut queue: VecDeque<NonTermId>) {
         let mut in_queue: HashSet<NonTermId> = queue.iter().copied().collect();
 
         while let Some(u) = queue.pop_front() {
@@ -874,7 +750,8 @@ mod tests {
         lhs: NonTermId,
         rhs: &[Token<K>],
     ) {
-        g.rules.entry(lhs).or_default().push(rc(rhs));
+        // g.rules.entry(lhs).or_default().push(rc(rhs));
+        g.add_rule(lhs,rc(rhs))
     }
 
     fn set<T: Eq + core::hash::Hash>(xs: &[T]) -> HashSet<T>
@@ -1228,14 +1105,15 @@ mod tests {
         const A: usize = 1;
 
         let mut g: LLGrammar<char> = LLGrammar::new();
-        // S rules
-        add_rule(&mut g, S, &[Token::NonTerm(A), Token::Term('x')]);
-        add_rule(&mut g, S, &[Token::Term('y')]);
+        
         // A rule
-        add_rule(&mut g, A, &[Token::Term('x')]);
+        g.add_rule_update(A, [Token::Term('x')].into());
 
+        // S rules
         g.add_start(S);
-        g.calculate();
+        g.add_rule_update(S, [Token::NonTerm(A), Token::Term('x')].into());
+        g.add_rule_update(S, [Token::Term('y')].into());
+        
 
         g.get_checked_table().unwrap();
     }
@@ -1247,15 +1125,16 @@ mod tests {
         const A: usize = 1;
 
         let mut g: LLGrammar<char> = LLGrammar::new();
-        // S rules
-        add_rule(&mut g, S, &[Token::NonTerm(A), Token::Term('x')]);
-        add_rule(&mut g, S, &[Token::Term('y')]);
+        
         // A rule
-        add_rule(&mut g, A, &[Token::Term('x')]);
-        add_rule(&mut g, A, &[]);
+        g.add_rule_update(A, [Token::Term('x')].into());
+        g.add_rule_update(A, [].into());
 
+        // S rules
         g.add_start(S);
-        g.calculate();
+        g.add_rule_update(S, [Token::NonTerm(A), Token::Term('x')].into());
+        g.add_rule_update(S, [Token::Term('y')].into());
+
 
         let err = g
             .get_checked_table()
