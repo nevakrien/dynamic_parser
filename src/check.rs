@@ -191,14 +191,16 @@ fn make_first_set<'a, K: Hash + Eq + Clone>(
         }
 
         Some(Token::NonTerm(id)) => {
-            let f = &first[id];
+            let Some(f) = first.get(id) else {
+                return first_seq.entry(tokens).or_default()
+            };
             if f.contains(&ExTerm::Empty) {
                 let mut set = get_first_set(tokens[1..].into(), first_seq, first).clone();
 
                 set.extend(f.iter().filter(|x| **x != ExTerm::Empty).cloned());
-                first_seq.entry(tokens.clone()).or_insert(set)
+                first_seq.entry(tokens).or_insert(set)
             } else {
-                first_seq.entry(tokens.clone()).or_insert(f.clone())
+                first_seq.entry(tokens).or_insert(f.clone())
             }
         }
     }
@@ -1125,16 +1127,15 @@ mod tests {
         const A: usize = 1;
 
         let mut g: LLGrammar<char> = LLGrammar::new();
-        
-        // A rule
-        g.add_rule_update(A, [Token::Term('x')].into());
-        g.add_rule_update(A, [].into());
 
         // S rules
         g.add_start(S);
         g.add_rule_update(S, [Token::NonTerm(A), Token::Term('x')].into());
         g.add_rule_update(S, [Token::Term('y')].into());
 
+        // A rule
+        g.add_rule_update(A, [Token::Term('x')].into());
+        g.add_rule_update(A, [].into());
 
         let err = g
             .get_checked_table()
